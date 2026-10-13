@@ -154,3 +154,10 @@ End-to-end testing, additional validation, documentation, and final demonstratio
 ## Disclaimer
 
 This project is currently a development prototype. Terraform plan output is simulated, and no live AWS resources are deployed through the application.
+
+## Development Workflow
+
+This project uses Git and GitHub for version control.
+
+New features are developed in separate branches,
+reviewed through pull requests, and merged into main.
