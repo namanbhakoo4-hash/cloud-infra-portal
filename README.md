@@ -161,3 +161,11 @@ This project uses Git and GitHub for version control.
 
 New features are developed in separate branches,
 reviewed through pull requests, and merged into main.
+
+## Project Features
+
+- User authentication and role-based access
+- Cloud infrastructure request management
+- Bill of Materials (BOM) generation
+- Infrastructure approval workflows
+- Terraform mock plan generation
