@@ -1,0 +1,20 @@
+
+{
+  "cloudProvider": "azure",
+  "currency": "USD",
+  "sourceUrl": "https://prices.azure.com/api/retail/prices",
+  "prices": [
+    {
+      "region": "centralindia",
+      "storageType": "standard-ssd-lrs",
+      "skuName": "E10 LRS",
+      "meterName": "E10 LRS Disk",
+      "diskCapacityGB": 128,
+      "pricePerDiskMonth": 10.56,
+      "unitOfMeasure": "1/Month",
+      "meterId": "3360028e-0ee9-41b0-bf90-2752eae9448e",
+      "effectiveDate": "2018-11-01T00:00:00Z",
+      "verifiedDate": "2026-10-14"
+    }
+  ]
+}

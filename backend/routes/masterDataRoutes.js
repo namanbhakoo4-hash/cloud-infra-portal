@@ -1,3 +1,4 @@
+
 const express = require('express')
 
 const MasterData = require('../models/MasterData')
@@ -6,12 +7,36 @@ const roleMiddleware = require('../middleware/roleMiddleware')
 
 const router = express.Router()
 
+const PROVIDERS = ['aws', 'azure', 'gcp']
 
-// ======================================================
-// 1. CREATE MASTER DATA
-// ADMIN ONLY
-// POST /api/master-data
-// ======================================================
+const getProvider = (value) => {
+  return value === undefined || value === ''
+    ? 'aws'
+    : value
+}
+
+const isValidProvider = (provider) => {
+  return PROVIDERS.includes(provider)
+}
+
+const isValidInstanceSpecs = (cpu, ram) => {
+  return (
+    cpu !== null &&
+    ram !== null &&
+    cpu !== undefined &&
+    ram !== undefined &&
+    cpu !== '' &&
+    ram !== '' &&
+    Number.isFinite(Number(cpu)) &&
+    Number.isFinite(Number(ram)) &&
+    Number(cpu) > 0 &&
+    Number(ram) > 0
+  )
+}
+
+// =====================================================
+// 1. CREATE MASTER DATA - ADMIN
+// =====================================================
 
 router.post(
   '/',
@@ -19,7 +44,6 @@ router.post(
   roleMiddleware('admin'),
   async (req, res) => {
     try {
-
       const {
         category,
         name,
@@ -29,80 +53,65 @@ router.post(
         isActive
       } = req.body
 
+      const cloudProvider = getProvider(req.body.cloudProvider)
 
-      // Basic required fields
-      if (!category || !name || !value) {
+      if (!isValidProvider(cloudProvider)) {
         return res.status(400).json({
-          message:
-            'Category, name and value are required'
+          message: 'Invalid cloud provider'
         })
       }
 
-
-      // Instance types must have CPU and RAM
-      if (category === 'instanceType') {
-
-        if (
-          cpu === undefined ||
-          cpu === '' ||
-          ram === undefined ||
-          ram === ''
-        ) {
-          return res.status(400).json({
-            message:
-              'CPU and RAM are required for instance types'
-          })
-        }
-
+      if (
+        typeof category !== 'string' ||
+        !category.trim() ||
+        typeof name !== 'string' ||
+        !name.trim() ||
+        typeof value !== 'string' ||
+        !value.trim()
+      ) {
+        return res.status(400).json({
+          message: 'Category, name and value are required'
+        })
       }
 
+      if (
+        category === 'instanceType' &&
+        !isValidInstanceSpecs(cpu, ram)
+      ) {
+        return res.status(400).json({
+          message: 'Valid CPU and RAM are required for instance types'
+        })
+      }
 
       const masterData = new MasterData({
-        category,
-        name,
-        value,
-
-        cpu:
-          cpu !== undefined && cpu !== ''
-            ? Number(cpu)
-            : null,
-
-        ram:
-          ram !== undefined && ram !== ''
-            ? Number(ram)
-            : null,
-
-        isActive:
-          isActive !== undefined
-            ? isActive
-            : true
+        cloudProvider,
+        category: category.trim(),
+        name: name.trim(),
+        value: value.trim(),
+        cpu: cpu === undefined || cpu === '' || cpu === null
+          ? null
+          : Number(cpu),
+        ram: ram === undefined || ram === '' || ram === null
+          ? null
+          : Number(ram),
+        isActive: isActive !== undefined ? isActive : true
       })
-
 
       await masterData.save()
 
-
-      res.status(201).json({
-        message:
-          'Master data created successfully',
-
+      return res.status(201).json({
+        message: 'Master data created successfully',
         masterData
       })
 
-
     } catch (error) {
+      console.error('Create master data error:', error)
 
-      console.log(error)
-
-
-      // Duplicate category + value
       if (error.code === 11000) {
         return res.status(400).json({
-          message:
-            'This value already exists in this category'
+          message: 'This value already exists for this provider and category'
         })
       }
-
 
       if (error.name === 'ValidationError') {
         return res.status(400).json({
@@ -110,112 +119,114 @@ router.post(
         })
       }
 
-
-      res.status(500).json({
+      return res.status(500).json({
         message: 'Server error'
       })
-
     }
   }
 )
 
-
-// ======================================================
+// =====================================================
 // 2. GET ALL MASTER DATA
-// ANY LOGGED-IN USER
-// GET /api/master-data
-// ======================================================
+// Optional cloudProvider query
+// =====================================================
 
 router.get(
   '/',
   authMiddleware,
   async (req, res) => {
     try {
+      const cloudProvider = getProvider(req.query.cloudProvider)
 
-      const masterData =
-        await MasterData.find()
-          .sort({
-            category: 1,
-            name: 1
-          })
+      if (!isValidProvider(cloudProvider)) {
+        return res.status(400).json({
+          message: 'Invalid cloud provider'
+        })
+      }
 
+      // No query: preserve existing Admin behavior,
+      // returning all providers.
+      const filter = req.query.cloudProvider === undefined
+        ? {}
+        : { cloudProvider }
 
-      res.json({
-        message:
-          'Master data fetched successfully',
+      const masterData = await MasterData.find(filter)
+        .sort({
+          cloudProvider: 1,
+          category: 1,
+          name: 1
+        })
 
+      return res.json({
+        message: 'Master data fetched successfully',
         masterData
       })
 
-
     } catch (error) {
+      console.error('Fetch master data error:', error)
 
-      console.log(error)
-
-      res.status(500).json({
+      return res.status(500).json({
         message: 'Server error'
       })
-
     }
   }
 )
 
-
-// ======================================================
-// 3. GET ACTIVE MASTER DATA BY CATEGORY
-// ANY LOGGED-IN USER
-//
-// Examples:
-//
-// /api/master-data/category/region
-// /api/master-data/category/service
-// /api/master-data/category/instanceType
-//
-// ======================================================
+// =====================================================
+// 3. GET ACTIVE MASTER DATA BY CATEGORY AND PROVIDER
+// =====================================================
 
 router.get(
   '/category/:category',
   authMiddleware,
   async (req, res) => {
     try {
+      const cloudProvider = getProvider(req.query.cloudProvider)
 
-      const masterData =
-        await MasterData.find({
-          category:
-            req.params.category,
+      // =============================================
+      // TEMPORARY DEBUGGING - NEWLY ADDED
+      // =============================================
+      console.log('Requested provider:', cloudProvider)
+      console.log('Requested category:', req.params.category)
+      console.log('Full request URL:', req.originalUrl)
 
-          isActive: true
-        }).sort({
-          name: 1
+      if (!isValidProvider(cloudProvider)) {
+        return res.status(400).json({
+          message: 'Invalid cloud provider'
         })
+      }
 
+      const masterData = await MasterData.find({
+        cloudProvider,
+        category: req.params.category,
+        isActive: true
+      }).sort({
+        name: 1
+      })
 
-      res.json({
-        message:
-          'Master data fetched successfully',
+      // TEMPORARY DEBUGGING
+      console.log('Records found:', masterData.length)
+      console.log('-----------------------------------')
 
+      return res.json({
+        message: 'Master data fetched successfully',
+        cloudProvider,
         masterData
       })
 
-
     } catch (error) {
+      console.error('Fetch category error:', error)
 
-      console.log(error)
-
-      res.status(500).json({
+      return res.status(500).json({
         message: 'Server error'
       })
-
     }
   }
 )
 
-
-// ======================================================
-// 4. UPDATE MASTER DATA
-// ADMIN ONLY
-// PUT /api/master-data/:id
-// ======================================================
+// =====================================================
+// 4. UPDATE MASTER DATA - ADMIN
+// =====================================================
 
 router.put(
   '/:id',
@@ -223,6 +234,13 @@ router.put(
   roleMiddleware('admin'),
   async (req, res) => {
     try {
+      const masterData = await MasterData.findById(req.params.id)
+
+      if (!masterData) {
+        return res.status(404).json({
+          message: 'Master data not found'
+        })
+      }
 
       const {
         category,
@@ -230,144 +248,95 @@ router.put(
         value,
         cpu,
         ram,
-        isActive
+        isActive,
+        cloudProvider
       } = req.body
 
-
-      const masterData =
-        await MasterData.findById(
-          req.params.id
-        )
-
-
-      if (!masterData) {
-        return res.status(404).json({
-          message:
-            'Master data not found'
-        })
-      }
-
-
-      // Update category
-      if (category !== undefined) {
-        masterData.category =
-          category
-      }
-
-
-      // Update name
-      if (name !== undefined) {
-        masterData.name =
-          name
-      }
-
-
-      // Update value
-      if (value !== undefined) {
-        masterData.value =
-          value
-      }
-
-
-      // Update CPU
-      if (cpu !== undefined) {
-        masterData.cpu =
-          cpu === ''
-            ? null
-            : Number(cpu)
-      }
-
-
-      // Update RAM
-      if (ram !== undefined) {
-        masterData.ram =
-          ram === ''
-            ? null
-            : Number(ram)
-      }
-
-
-      // Enable / Disable
-      if (isActive !== undefined) {
-        masterData.isActive =
-          isActive
-      }
-
-
-      // If it is an instance type,
-      // CPU and RAM must exist
-      if (
-        masterData.category ===
-        'instanceType'
-      ) {
-
-        if (
-          masterData.cpu === null ||
-          masterData.ram === null
-        ) {
+      if (cloudProvider !== undefined) {
+        if (!isValidProvider(cloudProvider)) {
           return res.status(400).json({
-            message:
-              'CPU and RAM are required for instance types'
+            message: 'Invalid cloud provider'
           })
         }
 
+        masterData.cloudProvider = cloudProvider
       }
 
+      if (category !== undefined) {
+        masterData.category = category
+      }
+
+      if (name !== undefined) {
+        masterData.name = name
+      }
+
+      if (value !== undefined) {
+        masterData.value = value
+      }
+
+      if (cpu !== undefined) {
+        masterData.cpu = cpu === '' || cpu === null
+          ? null
+          : Number(cpu)
+      }
+
+      if (ram !== undefined) {
+        masterData.ram = ram === '' || ram === null
+          ? null
+          : Number(ram)
+      }
+
+      if (isActive !== undefined) {
+        masterData.isActive = isActive
+      }
+
+      if (
+        masterData.category === 'instanceType' &&
+        !isValidInstanceSpecs(masterData.cpu, masterData.ram)
+      ) {
+        return res.status(400).json({
+          message: 'Valid CPU and RAM are required for instance types'
+        })
+      }
 
       await masterData.save()
 
-
-      res.json({
-        message:
-          'Master data updated successfully',
-
+      return res.json({
+        message: 'Master data updated successfully',
         masterData
       })
 
-
     } catch (error) {
-
-      console.log(error)
-
+      console.error('Update master data error:', error)
 
       if (error.code === 11000) {
         return res.status(400).json({
-          message:
-            'This value already exists in this category'
+          message: 'This value already exists for this provider and category'
         })
       }
-
 
       if (error.name === 'CastError') {
         return res.status(400).json({
-          message:
-            'Invalid master data ID'
+          message: 'Invalid master data ID'
         })
       }
-
 
       if (error.name === 'ValidationError') {
         return res.status(400).json({
-          message:
-            error.message
+          message: error.message
         })
       }
 
-
-      res.status(500).json({
+      return res.status(500).json({
         message: 'Server error'
       })
-
     }
   }
 )
 
-
-// ======================================================
-// 5. DELETE MASTER DATA
-// ADMIN ONLY
-// DELETE /api/master-data/:id
-// ======================================================
+// =====================================================
+// 5. DELETE MASTER DATA - ADMIN
+// =====================================================
 
 router.delete(
   '/:id',
@@ -375,50 +344,34 @@ router.delete(
   roleMiddleware('admin'),
   async (req, res) => {
     try {
-
-      const masterData =
-        await MasterData.findById(
-          req.params.id
-        )
-
+      const masterData = await MasterData.findById(req.params.id)
 
       if (!masterData) {
         return res.status(404).json({
-          message:
-            'Master data not found'
+          message: 'Master data not found'
         })
       }
-
 
       await masterData.deleteOne()
 
-
-      res.json({
-        message:
-          'Master data deleted successfully'
+      return res.json({
+        message: 'Master data deleted successfully'
       })
 
-
     } catch (error) {
-
-      console.log(error)
-
+      console.error('Delete master data error:', error)
 
       if (error.name === 'CastError') {
         return res.status(400).json({
-          message:
-            'Invalid master data ID'
+          message: 'Invalid master data ID'
         })
       }
 
-
-      res.status(500).json({
+      return res.status(500).json({
         message: 'Server error'
       })
-
     }
   }
 )
-
 
 module.exports = router

@@ -1,22 +1,162 @@
 
 const mongoose = require('mongoose')
 
+// =====================================================
+// INDIVIDUAL RESOURCE SCHEMA
+// =====================================================
+
+const resourceSchema = new mongoose.Schema(
+  {
+    service: {
+      type: String,
+      required: true
+    },
+
+    instanceType: {
+      type: String
+    },
+
+    cpu: {
+      type: Number,
+      min: 0
+    },
+
+    ram: {
+      type: Number,
+      min: 0
+    },
+
+    storage: {
+      type: Number,
+      min: 0
+    },
+
+    storageType: {
+      type: String,
+      default: ''
+    },
+
+    operatingSystem: {
+      type: String,
+      default: 'Linux'
+    },
+
+    billingModel: {
+      type: String,
+      default: 'On-Demand'
+    },
+
+    quantity: {
+      type: Number,
+      min: 1,
+      default: 1
+    }
+  },
+  { _id: false }
+)
+
+// =====================================================
+// PRICING SCHEMA
+// =====================================================
+
+const pricingComponentSchema = new mongoose.Schema(
+  {
+    resourceIndex: Number,
+
+    category: {
+      type: String
+    },
+
+    description: {
+      type: String
+    },
+
+    amount: {
+      type: Number,
+      min: 0
+    },
+
+    unit: {
+      type: String
+    },
+
+    rate: {
+      type: Number,
+      min: 0
+    },
+
+    source: {
+      type: String
+    }
+  },
+  { _id: false }
+)
+
+const estimatedCostSchema = new mongoose.Schema(
+  {
+    status: {
+      type: String,
+      enum: ['Not Calculated', 'Available', 'Unavailable'],
+      default: 'Not Calculated'
+    },
+
+    monthlyTotal: {
+      type: Number,
+      default: null,
+      min: 0
+    },
+
+    currency: {
+      type: String,
+      default: 'USD'
+    },
+
+    monthlyHours: {
+      type: Number,
+      default: 730,
+      min: 0
+    },
+
+    pricingSource: {
+      type: String,
+      default: ''
+    },
+
+    calculatedAt: {
+      type: Date,
+      default: null
+    },
+
+    breakdown: {
+      type: [pricingComponentSchema],
+      default: []
+    },
+
+    errorMessage: {
+      type: String,
+      default: ''
+    }
+  },
+  { _id: false }
+)
+
+// =====================================================
+// MAIN BOM SCHEMA
+// =====================================================
+
 const bomSchema = new mongoose.Schema(
   {
-    // User who created the BOM
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true
     },
 
-    // Unique BOM ticket number
     ticketId: {
       type: String,
       unique: true
     },
 
-    // Project information
     projectName: {
       type: String,
       required: true
@@ -33,43 +173,29 @@ const bomSchema = new mongoose.Schema(
       required: true
     },
 
+    // Existing BOMs without this field are treated as AWS.
+    cloudProvider: {
+      type: String,
+      enum: ['aws', 'azure', 'gcp'],
+      default: 'aws',
+      required: true
+    },
+
     region: {
       type: String,
       required: true
     },
 
-    // AWS resources requested by the user
-    resources: [
-      {
-        service: {
-          type: String,
-          required: true
-        },
+    resources: {
+      type: [resourceSchema],
+      default: []
+    },
 
-        instanceType: {
-          type: String
-        },
+    estimatedCost: {
+      type: estimatedCostSchema,
+      default: () => ({})
+    },
 
-        cpu: {
-          type: Number
-        },
-
-        ram: {
-          type: Number
-        },
-
-        storage: {
-          type: Number
-        },
-
-        quantity: {
-          type: Number,
-          default: 1
-        }
-      }
-    ],
-
-    // Reason for requesting infrastructure
     justification: {
       type: String,
       required: true
@@ -94,13 +220,11 @@ const bomSchema = new mongoose.Schema(
       default: 'Pending Review'
     },
 
-    // Cloud Engineer remarks
     engineerRemarks: {
       type: String,
       default: ''
     },
 
-    // Cloud Engineer who reviewed the BOM
     reviewedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
