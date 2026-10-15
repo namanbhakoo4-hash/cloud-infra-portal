@@ -1,7 +1,15 @@
+
 const mongoose = require('mongoose')
 
 const masterDataSchema = new mongoose.Schema(
   {
+    cloudProvider: {
+      type: String,
+      enum: ['aws', 'azure', 'gcp'],
+      default: 'aws',
+      required: true
+    },
+
     category: {
       type: String,
       required: true,
@@ -22,12 +30,14 @@ const masterDataSchema = new mongoose.Schema(
 
     cpu: {
       type: Number,
-      default: null
+      default: null,
+      min: 0
     },
 
     ram: {
       type: Number,
-      default: null
+      default: null,
+      min: 0
     },
 
     isActive: {
@@ -40,8 +50,11 @@ const masterDataSchema = new mongoose.Schema(
   }
 )
 
+// The same category/value can exist under
+// different cloud providers.
 masterDataSchema.index(
   {
+    cloudProvider: 1,
     category: 1,
     value: 1
   },

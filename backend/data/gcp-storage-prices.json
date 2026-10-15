@@ -1,0 +1,20 @@
+{
+  "cloudProvider": "gcp",
+  "currency": "USD",
+  "sourceUrl": "https://cloud.google.com/products/calculator",
+  "prices": [
+    {
+      "region": "asia-south1",
+      "storageType": "pd-balanced",
+      "pricePerGBMonth": 0.12,
+      "skuId": "C24C-88D9-75ED",
+      "unitOfMeasure": "GiB-month",
+      "verificationStatus": "verified",
+      "verificationMethod": "Derived from official Google Cloud Pricing Calculator totals for 100 GiB and 200 GiB, with other settings unchanged",
+      "calculatorTotal100GiB": 70.75,
+      "calculatorTotal200GiB": 82.75,
+      "verifiedDate": "2026-10-15",
+      "sourceUrl": "https://cloud.google.com/products/calculator"
+    }
+  ]
+}

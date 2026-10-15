@@ -1,3 +1,4 @@
+
 const express = require('express')
 const mongoose = require('mongoose')
 const cors = require('cors')
@@ -7,6 +8,7 @@ const authRoutes = require('./routes/authRoutes')
 const resourceRoutes = require('./routes/resourceRoutes')
 const bomRoutes = require('./routes/bomRoutes')
 const masterDataRoutes = require('./routes/masterDataRoutes')
+const pricingRoutes = require('./routes/pricingRoutes')
 
 const app = express()
 
@@ -55,6 +57,11 @@ app.use(
 app.use(
   '/api/master-data',
   masterDataRoutes
+)
+
+app.use(
+  '/api/pricing',
+  pricingRoutes
 )
 
 

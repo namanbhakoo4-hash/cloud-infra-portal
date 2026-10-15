@@ -1,0 +1,36 @@
+
+{
+  "cloudProvider": "gcp",
+  "currency": "USD",
+  "pricingSource": "Google Cloud General-purpose VM Pricing",
+  "sourceUrl": "https://cloud.google.com/products/compute/pricing/general-purpose#e2-machine-types",
+  "verifiedDate": "2026-10-14",
+  "pricingModel": "Default",
+  "monthlyHours": 730,
+  "prices": [
+    {
+      "region": "asia-south1",
+      "instanceType": "e2-standard-2",
+      "vcpu": 2,
+      "memoryGiB": 8,
+      "operatingSystem": "Linux",
+      "hourlyPrice": 0.08048436
+    },
+    {
+      "region": "asia-south1",
+      "instanceType": "e2-standard-4",
+      "vcpu": 4,
+      "memoryGiB": 16,
+      "operatingSystem": "Linux",
+      "hourlyPrice": 0.16096872
+    },
+    {
+      "region": "asia-south1",
+      "instanceType": "e2-standard-8",
+      "vcpu": 8,
+      "memoryGiB": 32,
+      "operatingSystem": "Linux",
+      "hourlyPrice": 0.32193744
+    }
+  ]
+}

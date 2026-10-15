@@ -41,3 +41,5 @@ terraform.rc
 Thumbs.db
 # Generated Terraform configurations
 terraform/generated/
+# Large downloaded AWS pricing dataset
+/backend/data/aws-ec2-ap-south-1.json

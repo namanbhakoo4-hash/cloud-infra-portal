@@ -1,0 +1,18 @@
+
+{
+  "cloudProvider": "aws",
+  "currency": "USD",
+  "sourceUrl": "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/ap-south-1/index.json",
+  "prices": [
+    {
+      "region": "ap-south-1",
+      "storageType": "gp3",
+      "pricePerGBMonth": 0.0912,
+      "sku": "D7RMW443YWTMZ4V5",
+      "rateCode": "D7RMW443YWTMZ4V5.JRTCKXETXF.6YS6EN2CT7",
+      "unit": "GB-Mo",
+      "effectiveDate": "2026-10-01T00:00:00Z",
+      "verifiedDate": "2026-10-14"
+    }
+  ]
+}
