@@ -20,6 +20,8 @@ const PRICING_DIRECTORY = path.join(
 
 const AWS_PRICING_DIRECTORY = PRICING_DIRECTORY
 
+// Stores AWS catalogs in memory, together with
+// the file version used to load each catalog.
 const awsPricingCache = new Map()
 
 // ==========================================
@@ -68,28 +70,72 @@ const getAwsVmPrice = async ({
     }
   }
 
-  let catalog = awsPricingCache.get(normalizedRegion)
+  // ========================================
+  // AUTOMATIC AWS CACHE REFRESH
+  // ========================================
 
-  if (!catalog) {
+  // Check the modification time and size of the
+  // pricing file to detect catalog updates.
+  const fileStats = fs.statSync(filePath)
+
+  const fileVersion =
+    `${fileStats.mtimeMs}-${fileStats.size}`
+
+  const cachedEntry = awsPricingCache.get(
+    normalizedRegion
+  )
+
+  let catalog
+
+  if (
+    cachedEntry &&
+    cachedEntry.fileVersion === fileVersion
+  ) {
+    // File is unchanged: reuse cached data.
+    catalog = cachedEntry.catalog
+  } else {
+    // File has changed or has not been loaded yet.
+    console.log(
+      `Loading updated AWS pricing for ${normalizedRegion}`
+    )
+
     const fileContents = fs.readFileSync(
       filePath,
       'utf8'
     )
 
-    catalog = JSON.parse(fileContents)
+    const updatedCatalog = JSON.parse(
+      fileContents
+    )
 
     if (
-      catalog.cloudProvider !== 'aws' ||
-      catalog.region !== normalizedRegion ||
-      !Array.isArray(catalog.prices)
+      updatedCatalog.cloudProvider !== 'aws' ||
+      updatedCatalog.region !== normalizedRegion ||
+      !Array.isArray(updatedCatalog.prices)
     ) {
       throw new Error(
-        'AWS pricing cache has an invalid format'
+        'AWS pricing catalog has an invalid format'
       )
     }
 
-    awsPricingCache.set(normalizedRegion, catalog)
+    // Cache only after successful parsing
+    // and validation.
+    catalog = updatedCatalog
+
+    awsPricingCache.set(normalizedRegion, {
+      fileVersion,
+      catalog
+    })
+
+    console.log(
+      'AWS pricing catalog loaded:',
+      catalog.extractedAt
+    )
   }
+
+  // ========================================
+  // FIND MATCHING AWS PRICE
+  // ========================================
 
   const matchingPrices = catalog.prices.filter(
     (item) =>
@@ -115,13 +161,18 @@ const getAwsVmPrice = async ({
   }
 
   const item = matchingPrices[0]
-  const hourlyPrice = Number(item.hourlyPrice)
+
+  const hourlyPrice = Number(
+    item.hourlyPrice
+  )
 
   if (
     !Number.isFinite(hourlyPrice) ||
     hourlyPrice < 0
   ) {
-    throw new Error('Invalid AWS EC2 hourly price')
+    throw new Error(
+      'Invalid AWS EC2 hourly price'
+    )
   }
 
   return {
@@ -181,7 +232,8 @@ const getAzureVmPrice = async ({
     )
   }
 
-  const azureRegion = AZURE_REGIONS[region] || region
+  const azureRegion =
+    AZURE_REGIONS[region] || region
 
   const filter = [
     "serviceName eq 'Virtual Machines'",
@@ -194,12 +246,15 @@ const getAzureVmPrice = async ({
 
   url.searchParams.set('$filter', filter)
 
-  const response = await fetch(url.toString(), {
-    headers: {
-      Accept: 'application/json'
-    },
-    signal: AbortSignal.timeout(20000)
-  })
+  const response = await fetch(
+    url.toString(),
+    {
+      headers: {
+        Accept: 'application/json'
+      },
+      signal: AbortSignal.timeout(20000)
+    }
+  )
 
   if (!response.ok) {
     throw new Error(
@@ -210,41 +265,44 @@ const getAzureVmPrice = async ({
   const data = await response.json()
 
   const isWindows =
-    String(operatingSystem).toLowerCase() === 'windows'
+    String(operatingSystem).toLowerCase() ===
+    'windows'
 
-  const matches = (data.Items || []).filter((item) => {
-    const productName = String(
-      item.productName || ''
-    ).toLowerCase()
+  const matches = (data.Items || []).filter(
+    (item) => {
+      const productName = String(
+        item.productName || ''
+      ).toLowerCase()
 
-    const skuName = String(
-      item.skuName || ''
-    ).toLowerCase()
+      const skuName = String(
+        item.skuName || ''
+      ).toLowerCase()
 
-    const meterName = String(
-      item.meterName || ''
-    ).toLowerCase()
+      const meterName = String(
+        item.meterName || ''
+      ).toLowerCase()
 
-    if (item.unitOfMeasure !== '1 Hour') {
-      return false
+      if (item.unitOfMeasure !== '1 Hour') {
+        return false
+      }
+
+      if (
+        skuName.includes('spot') ||
+        skuName.includes('low priority') ||
+        meterName.includes('spot') ||
+        meterName.includes('low priority')
+      ) {
+        return false
+      }
+
+      const productIsWindows =
+        productName.includes('windows')
+
+      return isWindows
+        ? productIsWindows
+        : !productIsWindows
     }
-
-    if (
-      skuName.includes('spot') ||
-      skuName.includes('low priority') ||
-      meterName.includes('spot') ||
-      meterName.includes('low priority')
-    ) {
-      return false
-    }
-
-    const productIsWindows =
-      productName.includes('windows')
-
-    return isWindows
-      ? productIsWindows
-      : !productIsWindows
-  })
+  )
 
   if (matches.length === 0) {
     return {
@@ -266,7 +324,9 @@ const getAzureVmPrice = async ({
         ).toLowerCase().includes('promo')
     ) || matches[0]
 
-  const hourlyPrice = Number(item.retailPrice)
+  const hourlyPrice = Number(
+    item.retailPrice
+  )
 
   if (
     !Number.isFinite(hourlyPrice) ||
@@ -319,9 +379,17 @@ const getGcpVmPrice = async ({
     )
   }
 
-  const normalizedRegion = String(region).trim()
-  const normalizedInstance = String(instanceType).trim()
-  const normalizedOS = String(operatingSystem).trim()
+  const normalizedRegion = String(
+    region
+  ).trim()
+
+  const normalizedInstance = String(
+    instanceType
+  ).trim()
+
+  const normalizedOS = String(
+    operatingSystem
+  ).trim()
 
   if (!fs.existsSync(GCP_PRICING_FILE)) {
     return {
@@ -342,7 +410,9 @@ const getGcpVmPrice = async ({
     'utf8'
   )
 
-  const catalog = JSON.parse(fileContents)
+  const catalog = JSON.parse(
+    fileContents
+  )
 
   if (
     catalog.cloudProvider !== 'gcp' ||
@@ -398,6 +468,7 @@ const getGcpVmPrice = async ({
   }
 
   const hourlyPrice = item.hourlyPrice
+
   const monthlyHours = catalog.monthlyHours
 
   return {
@@ -430,8 +501,13 @@ const getGcpVmPrice = async ({
 // ==========================================
 
 const getCloudPrice = async (options) => {
-  if (!options || typeof options !== 'object') {
-    throw new Error('Pricing options are required')
+  if (
+    !options ||
+    typeof options !== 'object'
+  ) {
+    throw new Error(
+      'Pricing options are required'
+    )
   }
 
   const provider = String(
@@ -450,7 +526,9 @@ const getCloudPrice = async (options) => {
     return getGcpVmPrice(options)
   }
 
-  throw new Error('Invalid cloud provider')
+  throw new Error(
+    'Invalid cloud provider'
+  )
 }
 
 // ==========================================

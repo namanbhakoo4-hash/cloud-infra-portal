@@ -11,8 +11,266 @@ const authMiddleware = require('../middleware/authMiddleware')
 const roleMiddleware = require('../middleware/roleMiddleware')
 
 const {
+  allocateSubnets
+} = require('../utils/subnetAllocator')
+
+const {
   createTerraformFiles
 } = require('../services/terraformService')
+
+// =====================================================
+// REGION CONFIGURATION FOR SIMULATED WORKFLOW
+//
+// These are illustrative AZ names, not live discovery.
+// Real account AZ discovery requires AWS credentials.
+// =====================================================
+
+function getConfiguredAvailabilityZones(region) {
+  if (
+    typeof region !== 'string' ||
+    !/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/.test(region)
+  ) {
+    throw new Error('Please select a valid AWS region.')
+  }
+
+  return [
+    `${region}a`,
+    `${region}b`,
+    `${region}c`
+  ]
+}
+
+// =====================================================
+// RESOURCE NORMALIZATION AND SUBNET GENERATION
+// =====================================================
+
+function normalizeResources(resources, region) {
+  if (!Array.isArray(resources) || resources.length === 0) {
+    throw new Error('Add at least one resource to the BOM.')
+  }
+
+  const resourceKeys = new Set()
+  const availabilityZones =
+    getConfiguredAvailabilityZones(region)
+
+  return resources.map((resource, index) => {
+    if (!resource || typeof resource !== 'object') {
+      throw new Error(`Resource ${index + 1} is invalid.`)
+    }
+
+    const service = String(resource.service || '')
+      .trim()
+      .toUpperCase()
+
+    if (!['VPC', 'EC2'].includes(service)) {
+      throw new Error(
+        `Resource ${index + 1} has an unsupported service.`
+      )
+    }
+
+    const resourceKey = String(
+      resource.resourceKey || `resource_${index + 1}`
+    ).trim()
+
+    if (
+      !/^[a-zA-Z0-9_-]+$/.test(resourceKey) ||
+      resourceKeys.has(resourceKey)
+    ) {
+      throw new Error(
+        `Resource ${index + 1} has an invalid or duplicate resource key.`
+      )
+    }
+
+    resourceKeys.add(resourceKey)
+
+    if (service === 'EC2') {
+      const config = resource.ec2Configuration
+
+      if (!config || typeof config !== 'object') {
+        throw new Error(
+          `EC2 configuration is required for resource ${index + 1}.`
+        )
+      }
+
+      const quantity = Number(config.quantity ?? 1)
+
+      if (
+        !Number.isInteger(quantity) ||
+        quantity < 1 ||
+        quantity > 100
+      ) {
+        throw new Error(
+          `EC2 quantity for resource ${index + 1} must be from 1 to 100.`
+        )
+      }
+
+      // AMI is intentionally optional. The Terraform service
+      // will resolve it from the selected OS and region later.
+      return {
+        ...resource,
+        resourceKey,
+        service,
+        ec2Configuration: {
+          ...config,
+          quantity,
+          amiId: String(config.amiId || '').trim()
+        }
+      }
+    }
+
+    const config = resource.vpcConfiguration
+
+    if (!config || typeof config !== 'object') {
+      throw new Error(
+        `VPC configuration is required for resource ${index + 1}.`
+      )
+    }
+
+    if (config.mode && config.mode !== 'new') {
+      throw new Error(
+        'New BOM submissions must create a new VPC. Existing VPC selection is not supported in the new form.'
+      )
+    }
+
+    const ipv4Cidr = String(config.ipv4Cidr || '').trim()
+
+    const publicQuantity = Number(config.publicQuantity ?? 0)
+    const privateQuantity = Number(config.privateQuantity ?? 0)
+
+    for (const [label, quantity] of [
+      ['Public', publicQuantity],
+      ['Private', privateQuantity]
+    ]) {
+      if (
+        !Number.isInteger(quantity) ||
+        quantity < 0 ||
+        quantity > 100
+      ) {
+        throw new Error(
+          `${label} subnet quantity must be a whole number from 0 to 100.`
+        )
+      }
+    }
+
+    if (
+      publicQuantity + privateQuantity > 0 &&
+      !ipv4Cidr
+    ) {
+      throw new Error(
+        'VPC CIDR is required when creating subnets.'
+      )
+    }
+
+    const publicFirstCidr = String(
+      config.publicFirstCidr || ''
+    ).trim()
+
+    const privateFirstCidr = String(
+      config.privateFirstCidr || ''
+    ).trim()
+
+    if (publicQuantity > 0 && !publicFirstCidr) {
+      throw new Error(
+        'Enter the first public subnet CIDR when public subnet quantity is greater than zero.'
+      )
+    }
+
+    if (privateQuantity > 0 && !privateFirstCidr) {
+      throw new Error(
+        'Enter the first private subnet CIDR when private subnet quantity is greater than zero.'
+      )
+    }
+
+    const subnets = allocateSubnets({
+      vpcCidr: ipv4Cidr,
+      publicFirstCidr,
+      publicQuantity,
+      privateFirstCidr,
+      privateQuantity,
+      region,
+      availabilityZones
+    })
+
+    const natGatewayMode = config.natGatewayMode || 'none'
+
+    if (!['none', 'single', 'per-az'].includes(natGatewayMode)) {
+      throw new Error(
+        'Select a valid NAT Gateway option.'
+      )
+    }
+
+    return {
+      ...resource,
+      resourceKey,
+      service,
+      vpcConfiguration: {
+        ...config,
+        mode: 'new',
+        ipv4Cidr,
+        publicFirstCidr,
+        privateFirstCidr,
+        publicQuantity,
+        privateQuantity,
+        creationExperience:
+          subnets.length > 0 ? 'vpc-and-more' : 'vpc-only',
+        subnets,
+        createInternetGateway:
+          config.createInternetGateway === true,
+        natGatewayMode
+      }
+    }
+  })
+}
+
+// =====================================================
+// SHARED BOM INPUT VALIDATION
+// =====================================================
+
+function validateBomInput(body) {
+  const {
+    projectName,
+    environment,
+    region,
+    resources,
+    justification
+  } = body
+
+  if (
+    typeof projectName !== 'string' ||
+    !projectName.trim() ||
+    typeof environment !== 'string' ||
+    ![
+      'Development',
+      'Testing',
+      'Staging',
+      'Production'
+    ].includes(environment) ||
+    typeof region !== 'string' ||
+    !region.trim() ||
+    !Array.isArray(resources) ||
+    resources.length === 0 ||
+    typeof justification !== 'string' ||
+    !justification.trim()
+  ) {
+    throw new Error(
+      'Please provide a project name, valid environment, AWS region, at least one resource, and business justification.'
+    )
+  }
+
+  return {
+    projectName: projectName.trim(),
+    environment,
+    region: region.trim(),
+    resources: normalizeResources(resources, region.trim()),
+    justification: justification.trim()
+  }
+}
+
+function sendInputError(res, error) {
+  return res.status(400).json({
+    message: error.message || 'Invalid BOM configuration'
+  })
+}
 
 // =====================================================
 // USER: CREATE BOM
@@ -24,25 +282,12 @@ router.post(
   roleMiddleware('user'),
   async (req, res) => {
     try {
-      const {
-        projectName,
-        environment,
-        region,
-        resources,
-        justification
-      } = req.body
+      let input
 
-      if (
-        !projectName ||
-        !environment ||
-        !region ||
-        !Array.isArray(resources) ||
-        resources.length === 0 ||
-        !justification
-      ) {
-        return res.status(400).json({
-          message: 'Please provide all required BOM details'
-        })
+      try {
+        input = validateBomInput(req.body)
+      } catch (error) {
+        return sendInputError(res, error)
       }
 
       const ticketId =
@@ -51,11 +296,12 @@ router.post(
       const bom = await BOM.create({
         createdBy: req.user.id,
         ticketId,
-        projectName,
-        environment,
-        region,
-        resources,
-        justification,
+        projectName: input.projectName,
+        environment: input.environment,
+        region: input.region,
+        cloudProvider: 'aws',
+        resources: input.resources,
+        justification: input.justification,
         status: 'Pending Review'
       })
 
@@ -149,17 +395,16 @@ router.put(
       }
 
       if (
-        ['Changes Requested', 'Rejected'].includes(status) &&
-        !engineerRemarks.trim()
+        typeof engineerRemarks !== 'string' ||
+        (
+          ['Changes Requested', 'Rejected'].includes(status) &&
+          !engineerRemarks.trim()
+        )
       ) {
         return res.status(400).json({
           message: 'Engineer remarks are required'
         })
       }
-
-      // =================================================
-      // APPROVAL: ATOMIC CLAIM
-      // =================================================
 
       if (status === 'Approved') {
         const bom = await BOM.findOneAndUpdate(
@@ -187,11 +432,6 @@ router.put(
           })
         }
 
-        console.log(
-          'Cloud Engineer approved BOM:',
-          bom.ticketId
-        )
-
         try {
           const terraformResult = createTerraformFiles(bom)
 
@@ -208,11 +448,6 @@ router.put(
           }
 
           await bom.save()
-
-          console.log(
-            'Terraform execution results saved in MongoDB:',
-            bom.ticketId
-          )
 
           return res.json({
             message:
@@ -234,6 +469,7 @@ router.put(
           await BOM.findByIdAndUpdate(bom._id, {
             $set: {
               status: 'Plan Failed',
+              'terraformExecution.generation': 'Failed',
               'terraformExecution.plan': 'Failed',
               'terraformExecution.planType': 'SIMULATED',
               'terraformExecution.executedAt': new Date()
@@ -247,10 +483,6 @@ router.put(
           })
         }
       }
-
-      // =================================================
-      // CHANGES REQUESTED OR REJECTED
-      // =================================================
 
       const bom = await BOM.findOneAndUpdate(
         {
@@ -307,25 +539,12 @@ router.put(
   roleMiddleware('user'),
   async (req, res) => {
     try {
-      const {
-        projectName,
-        environment,
-        region,
-        resources,
-        justification
-      } = req.body
+      let input
 
-      if (
-        !projectName ||
-        !environment ||
-        !region ||
-        !Array.isArray(resources) ||
-        resources.length === 0 ||
-        !justification
-      ) {
-        return res.status(400).json({
-          message: 'Please provide all required BOM details'
-        })
+      try {
+        input = validateBomInput(req.body)
+      } catch (error) {
+        return sendInputError(res, error)
       }
 
       const bom = await BOM.findOneAndUpdate(
@@ -336,11 +555,12 @@ router.put(
         },
         {
           $set: {
-            projectName,
-            environment,
-            region,
-            resources,
-            justification,
+            projectName: input.projectName,
+            environment: input.environment,
+            region: input.region,
+            cloudProvider: 'aws',
+            resources: input.resources,
+            justification: input.justification,
             status: 'Pending Review',
             engineerRemarks: '',
             reviewedBy: null,
@@ -374,6 +594,12 @@ router.put(
       })
     } catch (error) {
       console.error('Resubmit BOM error:', error)
+
+      if (error.name === 'CastError') {
+        return res.status(400).json({
+          message: 'Invalid BOM ID'
+        })
+      }
 
       return res.status(500).json({
         message: 'Failed to resubmit BOM'

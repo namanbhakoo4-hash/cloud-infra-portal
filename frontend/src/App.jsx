@@ -1,3 +1,4 @@
+
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 
 import Login from './pages/Login'
@@ -5,53 +6,40 @@ import Register from './pages/Register'
 import Dashboard from './pages/Dashboard'
 import UserDashboard from './pages/UserDashboard'
 import CloudEngineerDashboard from './pages/CloudEngineerDashboard'
+import CloudProviderSelection from './pages/CloudProviderSelection'
+import AzureDashboard from './AzureDashboard'
 
 function App() {
-
   return (
-
     <BrowserRouter>
-
       <Routes>
+        <Route path="/" element={<Login />} />
 
-        {/* LOGIN */}
+        <Route path="/register" element={<Register />} />
+
         <Route
-          path="/"
-          element={<Login />}
+          path="/cloud-provider"
+          element={<CloudProviderSelection />}
         />
 
-
-        {/* REGISTER */}
-        <Route
-          path="/register"
-          element={<Register />}
-        />
-
-
-        {/* USER DASHBOARD */}
         <Route
           path="/user-dashboard"
           element={<UserDashboard />}
         />
 
+        <Route
+          path="/azure-dashboard"
+          element={<AzureDashboard />}
+        />
 
-        {/* CLOUD ENGINEER DASHBOARD */}
         <Route
           path="/cloud-engineer-dashboard"
           element={<CloudEngineerDashboard />}
         />
 
-
-        {/* CURRENT ADMIN DASHBOARD */}
-        <Route
-          path="/dashboard"
-          element={<Dashboard />}
-        />
-
+        <Route path="/dashboard" element={<Dashboard />} />
       </Routes>
-
     </BrowserRouter>
-
   )
 }
 

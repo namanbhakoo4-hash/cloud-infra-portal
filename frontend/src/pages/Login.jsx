@@ -12,10 +12,6 @@ function Login() {
 
   const navigate = useNavigate()
 
-  // ==========================================
-  // LOGIN
-  // ==========================================
-
   const handleSubmit = async (e) => {
     e.preventDefault()
 
@@ -32,10 +28,7 @@ function Login() {
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({
-            email,
-            password
-          })
+          body: JSON.stringify({ email, password })
         }
       )
 
@@ -71,15 +64,9 @@ function Login() {
 
   return (
     <div className="login-page">
-
-      {/* LEFT SIDE */}
-
       <section className="login-brand-panel">
         <div className="login-brand-top">
-          <div className="login-brand-icon">
-            ☁
-          </div>
-
+          <div className="login-brand-icon">☁</div>
           <span>CloudOps Portal</span>
         </div>
 
@@ -126,11 +113,8 @@ function Login() {
         <div className="login-decoration login-decoration-two" />
       </section>
 
-      {/* RIGHT SIDE */}
-
       <section className="login-form-panel">
         <div className="login-form-wrapper">
-
           <div className="login-mobile-brand">
             ☁ CloudOps Portal
           </div>
@@ -148,36 +132,23 @@ function Login() {
             </p>
           </div>
 
-          <form
-            className="login-form"
-            onSubmit={handleSubmit}
-          >
-            {/* EMAIL */}
-
+          <form className="login-form" onSubmit={handleSubmit}>
             <div className="login-field">
-              <label htmlFor="login-email">
-                Email address
-              </label>
+              <label htmlFor="login-email">Email address</label>
 
               <input
                 id="login-email"
                 type="email"
                 placeholder="name@company.com"
                 value={email}
-                onChange={(e) =>
-                  setEmail(e.target.value)
-                }
+                onChange={(e) => setEmail(e.target.value)}
                 autoComplete="email"
                 required
               />
             </div>
 
-            {/* PASSWORD */}
-
             <div className="login-field">
-              <label htmlFor="login-password">
-                Password
-              </label>
+              <label htmlFor="login-password">Password</label>
 
               <div className="login-password-wrapper">
                 <input
@@ -185,9 +156,7 @@ function Login() {
                   type={showPassword ? 'text' : 'password'}
                   placeholder="Enter your password"
                   value={password}
-                  onChange={(e) =>
-                    setPassword(e.target.value)
-                  }
+                  onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
                   required
                 />
@@ -195,13 +164,9 @@ function Login() {
                 <button
                   type="button"
                   className="login-password-toggle"
-                  onClick={() =>
-                    setShowPassword(!showPassword)
-                  }
+                  onClick={() => setShowPassword(!showPassword)}
                   aria-label={
-                    showPassword
-                      ? 'Hide password'
-                      : 'Show password'
+                    showPassword ? 'Hide password' : 'Show password'
                   }
                 >
                   {showPassword ? 'Hide' : 'Show'}
@@ -209,15 +174,11 @@ function Login() {
               </div>
             </div>
 
-            {/* ERROR MESSAGE */}
-
             {message && (
               <div className="login-error" role="alert">
                 {message}
               </div>
             )}
-
-            {/* SIGN IN */}
 
             <button
               type="submit"
@@ -229,11 +190,8 @@ function Login() {
             </button>
           </form>
 
-          {/* REGISTER */}
-
           <div className="login-register">
             Don't have an account?{' '}
-
             <button
               type="button"
               onClick={() => navigate('/register')}
@@ -246,7 +204,6 @@ function Login() {
             <span aria-hidden="true">◈</span>
             Secure, role-based access
           </div>
-
         </div>
       </section>
     </div>
