@@ -114,16 +114,41 @@ function normalizeResourceKey(resource, index) {
   return String(resource.resourceKey || `resource_${index + 1}`)
 }
 
-function getAmiConfiguration(operatingSystem) {
-  const osName = String(operatingSystem || 'Amazon Linux 2023')
-    .trim()
-    .toLowerCase()
+function getAmiConfiguration(operatingSystem, operatingSystemType) {
+  const family = String(operatingSystem || 'Linux').trim().toLowerCase()
+  const selectedType = String(
+    operatingSystemType || (family === 'windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS')
+  ).trim()
+  const type = selectedType.toLowerCase()
 
-  if (
-    osName === 'amazon linux 2023' ||
-    osName === 'amazon linux' ||
-    osName === 'al2023'
-  ) {
+  if (family === 'windows') {
+    if (type === 'windows 10' || type === 'windows 11') {
+      throw new Error(
+        `${selectedType} requires an approved custom AMI in your AWS account. Standard AWS-provided EC2 images are generally Windows Server images.`
+      )
+    }
+
+    const windowsVersion = /^windows server (2019|2022|2025)$/.exec(type)
+
+    if (!windowsVersion) {
+      throw new Error(`Unsupported Windows type "${selectedType}".`)
+    }
+
+    const version = windowsVersion[1]
+
+    return {
+      name: `windows_server_${version}`,
+      owners: ['amazon'],
+      nameFilter: `Windows_Server-${version}-English-Full-Base-*`,
+      description: `Windows Server ${version}, English, x86_64`
+    }
+  }
+
+  if (family !== 'linux') {
+    throw new Error(`Unsupported operating system "${operatingSystem}".`)
+  }
+
+  if (type === 'amazon linux 2023' || type === 'amazon linux' || type === 'al2023') {
     return {
       name: 'amazon_linux_2023',
       owners: ['amazon'],
@@ -132,7 +157,7 @@ function getAmiConfiguration(operatingSystem) {
     }
   }
 
-  if (osName === 'amazon linux 2' || osName === 'al2') {
+  if (type === 'amazon linux 2' || type === 'al2') {
     return {
       name: 'amazon_linux_2',
       owners: ['amazon'],
@@ -141,31 +166,35 @@ function getAmiConfiguration(operatingSystem) {
     }
   }
 
-  if (osName === 'ubuntu' || osName.startsWith('ubuntu ')) {
+  if (type === 'ubuntu 22.04 lts' || type === 'ubuntu' || type === 'ubuntu 22.04') {
     return {
-      name: 'ubuntu',
+      name: 'ubuntu_2204',
       owners: ['099720109477'],
-      nameFilter: 'ubuntu/images/hvm-ssd*/ubuntu-*-22.04-amd64-server-*',
+      nameFilter: 'ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*',
       description: 'Ubuntu Server 22.04 LTS, x86_64'
     }
   }
 
-  if (
-    osName === 'windows' ||
-    osName === 'windows server' ||
-    osName.startsWith('windows server ')
-  ) {
+  if (type === 'ubuntu 24.04 lts' || type === 'ubuntu 24.04') {
     return {
-      name: 'windows_server',
-      owners: ['amazon'],
-      nameFilter: 'Windows_Server-2022-English-Full-Base-*',
-      description: 'Windows Server 2022, English, x86_64'
+      name: 'ubuntu_2404',
+      owners: ['099720109477'],
+      nameFilter: 'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*',
+      description: 'Ubuntu Server 24.04 LTS, x86_64'
+    }
+  }
+
+  if (type === 'kali linux' || type === 'kali') {
+    return {
+      name: 'kali_linux',
+      owners: ['679593333241'],
+      nameFilter: '*Kali*Linux*',
+      description: 'Kali Linux, x86_64'
     }
   }
 
   throw new Error(
-    `Unsupported operating system "${operatingSystem}". ` +
-    'Supported options: Amazon Linux 2023, Amazon Linux 2, Ubuntu, Windows Server.'
+    `Unsupported Linux type "${selectedType}". Supported options: Ubuntu 22.04 LTS, Ubuntu 24.04 LTS, Kali Linux, Amazon Linux 2023, Amazon Linux 2.`
   )
 }
 
@@ -629,25 +658,16 @@ resource "aws_route_table_association" "${associationLabel}" {
       )
     }
 
-    // Legacy AMI IDs remain accepted, but are not required.
-    // When omitted, Terraform looks up an image by OS and region.
-    const amiId = String(config.amiId || '').trim()
-    let amiReference
+    const amiConfig = getAmiConfiguration(
+      config.operatingSystem || resource.operatingSystem || 'Linux',
+      config.operatingSystemType || resource.operatingSystemType
+    )
+    const amiLabel = `ami_${terraformName(amiConfig.name)}`
 
-    if (amiId) {
-      if (!/^ami-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/.test(amiId)) {
-        throw new Error('Invalid EC2 AMI ID format')
-      }
+    if (!amiConfigurations.has(amiLabel)) {
+      amiConfigurations.set(amiLabel, amiConfig)
 
-      amiReference = hcl(amiId)
-    } else {
-      const amiConfig = getAmiConfiguration(config.operatingSystem)
-      const amiLabel = `ami_${terraformName(amiConfig.name)}`
-
-      if (!amiConfigurations.has(amiLabel)) {
-        amiConfigurations.set(amiLabel, amiConfig)
-
-        blocks.push(`
+      blocks.push(`
 data "aws_ami" "${amiLabel}" {
   most_recent = true
   owners      = ${tfList(amiConfig.owners)}
@@ -668,14 +688,13 @@ data "aws_ami" "${amiLabel}" {
   }
 }
 `)
-      }
-
-      amiReference = `data.aws_ami.${amiLabel}.id`
-
-      warnings.push(
-        `${name}: AMI will be looked up from AWS when Terraform queries the selected region.`
-      )
     }
+
+    const amiReference = `data.aws_ami.${amiLabel}.id`
+
+    warnings.push(
+      `${name}: AMI will be looked up automatically for ${config.operatingSystemType || resource.operatingSystemType || config.operatingSystem || resource.operatingSystem} in ${region}.`
+    )
 
     for (let instance = 1; instance <= quantity; instance++) {
       const moduleLabel = terraformName(`ec2_${index + 1}_${instance}`)
@@ -706,7 +725,7 @@ module "${moduleLabel}" {
       addPlanned('aws_instance', moduleLabel, {
         instanceName,
         instanceType,
-        amiSource: amiId ? 'provided AMI ID' : 'automatic OS and region lookup'
+        amiSource: 'automatic OS type and region lookup'
       })
     }
   })
