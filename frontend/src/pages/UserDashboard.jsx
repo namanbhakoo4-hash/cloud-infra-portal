@@ -1611,79 +1611,8 @@ function UserDashboard() {
 
               </Field>
 
-              <Field label="Instance Tenancy">
 
-                <select
 
-                  value={config.tenancy}
-
-                  onChange={(e) =>
-
-                    updateVpc({ tenancy: e.target.value })
-
-                  }
-
-                >
-
-                  <option value="default">Default</option>
-
-                  <option value="dedicated">Dedicated</option>
-
-                </select>
-
-              </Field>
-
-              <Field label="DNS Support">
-
-                <select
-
-                  value={String(config.enableDnsSupport)}
-
-                  onChange={(e) =>
-
-                    updateVpc({
-
-                      enableDnsSupport: e.target.value === 'true'
-
-                    })
-
-                  }
-
-                >
-
-                  <option value="true">Enabled</option>
-
-                  <option value="false">Disabled</option>
-
-                </select>
-
-              </Field>
-
-              <Field label="DNS Hostnames">
-
-                <select
-
-                  value={String(config.enableDnsHostnames)}
-
-                  onChange={(e) =>
-
-                    updateVpc({
-
-                      enableDnsHostnames: e.target.value === 'true'
-
-                    })
-
-                  }
-
-                >
-
-                  <option value="true">Enabled</option>
-
-                  <option value="false">Disabled</option>
-
-                </select>
-
-              </Field>
 
             </>
 
@@ -2271,9 +2200,10 @@ function UserDashboard() {
 
                 <>
 
-                  <option value="Windows 10">Windows 10 (Custom AMI required)</option>
+                  <option value="Windows 10">Windows 10</option>
 
-                  <option value="Windows 11">Windows 11 (Custom AMI required)</option>
+                  <option value="Windows 11">Windows 11</option>
+
                   <option value="Windows Server 2019">Windows Server 2019</option>
 
                   <option value="Windows Server 2022">Windows Server 2022</option>
