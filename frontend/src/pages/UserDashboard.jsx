@@ -118,6 +118,8 @@ const newEc2 = () => ({
 
   operatingSystem: 'Linux',
 
+  operatingSystemType: 'Ubuntu 22.04 LTS',
+
   storage: 20,
 
   storageType: 'gp3',
@@ -128,13 +130,13 @@ const newEc2 = () => ({
 
     instanceName: '',
 
-    amiId: '',
-
     instanceType: '',
 
     keyPairName: '',
 
     operatingSystem: 'Linux',
+
+    operatingSystemType: 'Ubuntu 22.04 LTS',
 
     quantity: 1,
 
@@ -422,12 +424,6 @@ function validateResources(resources, region, instanceTypes) {
     const config = resource.ec2Configuration
 
     const network = config.network
-
-    if (!awsId(config.amiId, 'ami')) {
-
-      return `${label}: enter a valid AMI ID.`
-
-    }
 
     if (!instanceTypes.some(
 
@@ -1205,6 +1201,8 @@ function UserDashboard() {
 
               ...resource.ec2Configuration,
 
+              operatingSystemType: resource.ec2Configuration?.operatingSystemType || resource.operatingSystemType || (resource.operatingSystem === 'Windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS'),
+
               network: {
 
                 ...defaults.ec2Configuration.network,
@@ -1305,6 +1303,8 @@ function UserDashboard() {
 
           operatingSystem: item.operatingSystem,
 
+          operatingSystemType: item.ec2Configuration.operatingSystemType || item.operatingSystemType || (item.operatingSystem === 'Windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS'),
+
           storage: Number(item.storage),
 
           storageType: item.storageType,
@@ -1324,6 +1324,8 @@ function UserDashboard() {
             instanceType: item.instanceType,
 
             operatingSystem: item.operatingSystem,
+
+            operatingSystemType: item.ec2Configuration.operatingSystemType || item.operatingSystemType || (item.operatingSystem === 'Windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS'),
 
             quantity: Number(item.quantity)
 
@@ -2193,45 +2195,39 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="AMI ID *">
-
-            <input
-
-              value={config.amiId}
-
-              onChange={(e) =>
-
-                updateEc2({ amiId: e.target.value })
-
-              }
-
-              placeholder="ami-0123456789abcdef0"
-
-            />
-
-            <small>
-
-              Use a real AMI available in the selected AWS Region.
-
-            </small>
-
-          </Field>
-
           <Field label="Operating System">
 
             <select
 
               value={active.operatingSystem}
 
-              onChange={(e) =>
+              onChange={(e) => {
+
+                const operatingSystem = e.target.value
+
+                const operatingSystemType = operatingSystem === 'Windows'
+                  ? 'Windows Server 2022'
+                  : 'Ubuntu 22.04 LTS'
 
                 updateActive({
 
-                  operatingSystem: e.target.value
+                  operatingSystem,
+
+                  operatingSystemType,
+
+                  ec2Configuration: {
+
+                    ...config,
+
+                    operatingSystem,
+
+                    operatingSystemType
+
+                  }
 
                 })
 
-              }
+              }}
 
             >
 
@@ -2240,6 +2236,77 @@ function UserDashboard() {
               <option value="Windows">Windows</option>
 
             </select>
+
+          </Field>
+
+          <Field label="Type">
+
+            <select
+
+              value={config.operatingSystemType || active.operatingSystemType || (active.operatingSystem === 'Windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS')}
+
+              onChange={(e) => {
+
+                const operatingSystemType = e.target.value
+
+                updateActive({
+
+                  operatingSystemType,
+
+                  ec2Configuration: {
+
+                    ...config,
+
+                    operatingSystemType
+
+                  }
+
+                })
+
+              }}
+
+            >
+
+              {active.operatingSystem === 'Windows' ? (
+
+                <>
+
+                  <option value="Windows 10">Windows 10 (Custom AMI required)</option>
+
+                  <option value="Windows 11">Windows 11 (Custom AMI required)</option>
+                  <option value="Windows Server 2019">Windows Server 2019</option>
+
+                  <option value="Windows Server 2022">Windows Server 2022</option>
+
+                  <option value="Windows Server 2025">Windows Server 2025</option>
+
+                </>
+
+              ) : (
+
+                <>
+
+                  <option value="Ubuntu 22.04 LTS">Ubuntu 22.04 LTS</option>
+
+                  <option value="Ubuntu 24.04 LTS">Ubuntu 24.04 LTS</option>
+
+                  <option value="Kali Linux">Kali Linux</option>
+
+                  <option value="Amazon Linux 2023">Amazon Linux 2023</option>
+
+                  <option value="Amazon Linux 2">Amazon Linux 2</option>
+
+                </>
+
+              )}
+
+            </select>
+
+            {active.operatingSystem === 'Windows' && ['Windows 10', 'Windows 11'].includes(config.operatingSystemType || active.operatingSystemType) && (
+
+              <small>Windows 10/11 requires an approved custom AMI. Standard AWS Windows Server images are selected automatically.</small>
+
+            )}
 
           </Field>
 
