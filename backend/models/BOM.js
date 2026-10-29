@@ -212,7 +212,7 @@ const terraformExecutionSchema = new mongoose.Schema({
     enum: ['Not Started', 'Success', 'Failed'],
     default: 'Not Started'
   },
-  validate: {
+  validation: {
     type: String,
     enum: ['Not Started', 'Success', 'Failed'],
     default: 'Not Started'

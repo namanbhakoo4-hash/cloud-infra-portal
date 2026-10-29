@@ -76,7 +76,6 @@ const newVpc = () => ({
 
     mode: 'new',
 
-    creationExperience: 'vpc-only',
 
     name: '',
 
@@ -90,7 +89,12 @@ const newVpc = () => ({
 
     enableDnsHostnames: true,
 
-    subnets: [],
+    subnets: [
+      { ...newSubnet('public', '10.0.1.0/24'), availabilityZone: 'ap-south-1a' },
+      { ...newSubnet('private', '10.0.2.0/24'), availabilityZone: 'ap-south-1b' }
+    ],
+
+    subnetConfiguration: 'public-private',
 
     createInternetGateway: false,
 
@@ -306,20 +310,7 @@ function validateResources(resources, region, instanceTypes) {
     }
 
     const subnetList = config.subnets || []
-
-    if (
-
-      config.creationExperience === 'vpc-only' &&
-
-      subnetList.length
-
-    ) {
-
-      return `${label}: VPC-only mode cannot include subnets.`
-
-    }
-
-    const previousCidrs = []
+const previousCidrs = []
 
     let hasPublicSubnet = false
 
@@ -599,6 +590,8 @@ function UserDashboard() {
 
   const [resources, setResources] = useState([newBlankResource()])
 
+  const [addedResourceKeys, setAddedResourceKeys] = useState([])
+
   const [activeIndex, setActiveIndex] = useState(0)
 
   const [pricing, setPricing] = useState({
@@ -657,13 +650,15 @@ function UserDashboard() {
 
   )].sort((a, b) => a - b)
 
-  const matchingInstances = instanceTypes.filter((item) =>
+  const filteredMatchingInstances = instanceTypes.filter((item) =>
 
     (!active?.cpu || Number(item.cpu) === Number(active.cpu)) &&
 
     (!active?.ram || Number(item.ram) === Number(active.ram))
 
   )
+
+  const matchingInstances = filteredMatchingInstances
 
   function updateActive(changes) {
 
@@ -1263,7 +1258,7 @@ function UserDashboard() {
 
       justification: justification.trim(),
 
-      resources: resources.map((item) => {
+      resources: resources.filter((item) => addedResourceKeys.includes(item.resourceKey) && ['VPC', 'EC2'].includes(item.service)).map((item) => {
 
         if (item.service === 'VPC') {
 
@@ -1342,115 +1337,78 @@ function UserDashboard() {
   }
 
   async function handleSubmit(event) {
-
     event.preventDefault()
-
     if (submitting) return
-
-    if (cloudProvider !== 'aws') {
-
-      setMessage('Only AWS BOM submission is enabled.')
-
-      return
-
-    }
-
-    if (!projectName.trim() || !region || !justification.trim()) {
-
-      setMessage('Complete the project information.')
-
-      return
-
-    }
-
-    const validationError = validateResources(
-
-      resources,
-
-      region,
-
-      instanceTypes
-
-    )
-
-    if (validationError) {
-
-      setMessage(validationError)
-
-      return
-
-    }
-
-    setSubmitting(true)
 
     setMessage('')
 
     try {
+      if (cloudProvider !== 'aws') {
+        throw new Error('Only AWS BOM submission is enabled.')
+      }
 
+      const missingProjectInformation = []
+      if (!projectName.trim()) missingProjectInformation.push('Project Name')
+      if (!region) missingProjectInformation.push('AWS Region')
+      if (!justification.trim()) missingProjectInformation.push('Justification')
+
+      if (missingProjectInformation.length > 0) {
+        throw new Error(`Please complete the following required field${missingProjectInformation.length > 1 ? 's' : ''}: ${missingProjectInformation.join(', ')}.`)
+      }
+
+      const configuredResources = resources.filter(
+        (item) => addedResourceKeys.includes(item.resourceKey) && ['VPC', 'EC2'].includes(item.service)
+      )
+
+      if (configuredResources.length === 0) {
+        throw new Error('Add at least one configured VPC or EC2 resource before submitting the BOM.')
+      }
+
+      const validationError = validateResources(
+        configuredResources,
+        region,
+        instanceTypes
+      )
+
+      if (validationError) {
+        throw new Error(validationError)
+      }
+
+      setSubmitting(true)
       const editing = Boolean(editingBomId)
-
       const response = await fetch(
-
         editing
-
           ? `${API}/api/bom/${editingBomId}/resubmit`
-
           : `${API}/api/bom`,
-
         {
-
           method: editing ? 'PUT' : 'POST',
-
           headers: {
-
             ...authHeaders(),
-
             'Content-Type': 'application/json'
-
           },
-
           body: JSON.stringify(buildPayload())
-
         }
-
       )
 
       const data = await response.json()
-
       if (!response.ok) {
-
         throw new Error(data.message || 'BOM submission failed.')
-
       }
 
       const ticketId = data.bom?.ticketId
-
       resetForm()
-
       setShowForm(false)
-
       await loadBoms()
-
       setMessage(
-
         editing
-
           ? 'BOM updated and resubmitted successfully.'
-
-          : `BOM submitted successfully. Ticket: ${ticketId}`
-
+          : `BOM submitted successfully. Ticket: ${ticketId || 'created'}`
       )
-
     } catch (error) {
-
-      setMessage(error.message)
-
+      setMessage(error?.message || 'BOM submission failed. Check that the backend is running and try again.')
     } finally {
-
       setSubmitting(false)
-
     }
-
   }
 
   function renderVpcForm() {
@@ -1533,38 +1491,6 @@ function UserDashboard() {
 
             <>
 
-              <Field label="Creation Experience">
-
-                <select
-
-                  value={config.creationExperience}
-
-                  onChange={(e) =>
-
-                    updateVpc({
-
-                      creationExperience: e.target.value,
-
-                      subnets: [],
-
-                      createInternetGateway: false,
-
-                      natGatewayMode: 'none'
-
-                    })
-
-                  }
-
-                >
-
-                  <option value="vpc-only">VPC Only</option>
-
-                  <option value="vpc-and-more">VPC and More</option>
-
-                </select>
-
-              </Field>
-
               <Field label="VPC Name">
 
                 <input
@@ -1620,9 +1546,7 @@ function UserDashboard() {
 
         </div>
 
-        {config.mode === 'new' &&
-
-          config.creationExperience === 'vpc-and-more' && (
+        {config.mode === 'new' && (
 
           <>
 
@@ -1634,11 +1558,155 @@ function UserDashboard() {
 
             <p>
 
-              Create one or more subnets. Each subnet must have a
+              Choose how many subnets to create and how they should be configured.
 
-              non-overlapping CIDR within the VPC.
+              Each subnet must have a non-overlapping CIDR within the VPC.
 
             </p>
+
+            <div className="user-form-grid">
+
+              <Field label="Number of subnets">
+
+                <select
+
+                  value={String(config.subnets.length || 2)}
+
+                  onChange={(e) => {
+
+                    const count = Number(e.target.value)
+
+                    const currentMode = config.subnetConfiguration || (config.subnets.some((subnet) => subnet.subnetType === 'public') &&
+
+                      config.subnets.some((subnet) => subnet.subnetType === 'private')
+
+                      ? 'public-private'
+
+                      : config.subnets.every((subnet) => subnet.subnetType === 'public')
+
+                        ? 'public'
+
+                        : 'private')
+
+                    const nextSubnets = Array.from({ length: count }, (_, index) => {
+
+                      const existing = config.subnets[index]
+
+                      const subnetType = currentMode === 'public'
+
+                        ? 'public'
+
+                        : currentMode === 'private'
+
+                          ? 'private'
+
+                          : index % 2 === 0 ? 'public' : 'private'
+
+                      return existing
+
+                        ? { ...existing, subnetType }
+
+                        : {
+
+                            ...newSubnet(subnetType, cidrForSubnet(config.ipv4Cidr, index, 24)),
+
+                            availabilityZone: `${region || 'ap-south-1'}${String.fromCharCode(97 + (index % 26))}`
+
+                          }
+
+                    })
+
+                    updateVpc({
+
+                      subnetConfiguration: currentMode,
+
+                      subnets: nextSubnets,
+
+                      createInternetGateway: currentMode !== 'private' || config.createInternetGateway
+
+                    })
+
+                  }}
+
+                >
+
+                  {[1, 2, 3, 4].map((count) => (
+
+                    <option key={count} value={count}>{count}</option>
+
+                  ))}
+
+                </select>
+
+              </Field>
+
+              <Field label="Subnet configuration">
+
+                <select
+
+                  value={config.subnetConfiguration || (config.subnets.length && config.subnets.every((subnet) => subnet.subnetType === 'public')
+
+                    ? 'public'
+
+                    : config.subnets.length && config.subnets.every((subnet) => subnet.subnetType === 'private')
+
+                      ? 'private'
+
+                      : 'public-private')}
+
+                  onChange={(e) => {
+
+                    const mode = e.target.value
+
+                    updateVpc({
+
+                      subnetConfiguration: mode,
+
+                      subnets: config.subnets.map((subnet, index) => ({
+
+                        ...subnet,
+
+                        subnetType: mode === 'public'
+
+                          ? 'public'
+
+                          : mode === 'private'
+
+                            ? 'private'
+
+                            : index % 2 === 0 ? 'public' : 'private',
+
+                        mapPublicIpOnLaunch: false
+
+                      })),
+
+                      createInternetGateway: mode !== 'private' || config.createInternetGateway,
+
+                      natGatewayMode: mode === 'private' ? 'none' : config.natGatewayMode
+
+                    })
+
+                  }}
+
+                >
+
+                  <option value="public-private">Public and private subnets</option>
+
+                  <option value="public">All public subnets</option>
+
+                  <option value="private">All private subnets</option>
+
+                </select>
+
+              </Field>
+
+            </div>
+
+            <div className="user-form-section-title">
+
+              Subnet details ({config.subnets.length})
+
+            </div>
 
             {config.subnets.map((subnet, index) => (
 
@@ -1684,27 +1752,41 @@ function UserDashboard() {
 
                       value={subnet.subnetType}
 
-                      onChange={(e) =>
+                      onChange={(e) => {
 
-                        updateSubnet(index, {
+                        const subnetType = e.target.value
 
-                          subnetType: e.target.value,
+                        const nextSubnets = config.subnets.map((item, itemIndex) =>
 
-                          mapPublicIpOnLaunch: false,
+                          itemIndex === index
 
-                          ipv4Cidr: subnet.ipv4Cidr || cidrForSubnet(
+                            ? { ...item, subnetType, mapPublicIpOnLaunch: false }
 
-                            config.ipv4Cidr,
+                            : item
 
-                            index,
+                        )
 
-                            24
+                        const hasPublicSubnet = nextSubnets.some((item) => item.subnetType === 'public')
 
-                          )
+                        const hasPrivateSubnet = nextSubnets.some((item) => item.subnetType === 'private')
+
+                        updateVpc({
+
+                          subnets: nextSubnets,
+
+                          subnetConfiguration: hasPublicSubnet && hasPrivateSubnet
+
+                            ? 'public-private'
+
+                            : hasPublicSubnet ? 'public' : 'private',
+
+                          createInternetGateway: hasPublicSubnet || config.createInternetGateway,
+
+                          natGatewayMode: hasPublicSubnet ? config.natGatewayMode : 'none'
 
                         })
 
-                      }
+                      }}
 
                     >
 
@@ -1816,69 +1898,9 @@ function UserDashboard() {
 
                 </div>
 
-                <button
-
-                  type="button"
-
-                  className="user-secondary-btn"
-
-                  onClick={() =>
-
-                    updateVpc({
-
-                      subnets: config.subnets.filter(
-
-                        (_, itemIndex) => itemIndex !== index
-
-                      )
-
-                    })
-
-                  }
-
-                >
-
-                  Remove Subnet
-
-                </button>
-
               </div>
 
             ))}
-
-            <button
-
-              type="button"
-
-              className="user-secondary-btn"
-
-              onClick={() =>
-
-                updateVpc({
-
-                  subnets: [
-
-                    ...config.subnets,
-
-                    newSubnet(
-
-                      'private',
-
-                      cidrForSubnet(config.ipv4Cidr, config.subnets.length, 24)
-
-                    )
-
-                  ]
-
-                })
-
-              }
-
-            >
-
-              + Add Subnet
-
-            </button>
 
             <div
 
@@ -1957,6 +1979,28 @@ function UserDashboard() {
             </p>
 
           </>
+
+        )}
+
+        {config.mode === 'new' && (
+
+          <div style={{ marginTop: 16 }}>
+
+            <button
+
+              type="button"
+
+              className="user-primary-btn"
+
+              onClick={() => setAddedResourceKeys((previous) => previous.includes(active.resourceKey) ? previous : [...previous, active.resourceKey])}
+
+            >
+
+              {addedResourceKeys.includes(active.resourceKey) ? 'VPC Added to Resources' : 'Add VPC to Resources'}
+
+            </button>
+
+          </div>
 
         )}
 
@@ -2108,7 +2152,7 @@ function UserDashboard() {
 
             >
 
-              <option value="">Select Instance Type</option>
+              <option value="">{matchingInstances.length ? 'Select Instance Type' : 'No instances match the selected CPU/RAM preferences'}</option>
 
               {matchingInstances.map((item) => (
 
@@ -2700,6 +2744,24 @@ function UserDashboard() {
 
           )}
 
+        </div>
+
+        <div style={{ marginTop: 16 }}>
+          <button
+            type="button"
+            className="user-primary-btn"
+            onClick={() =>
+              setAddedResourceKeys((previous) =>
+                previous.includes(active.resourceKey)
+                  ? previous
+                  : [...previous, active.resourceKey]
+              )
+            }
+          >
+            {addedResourceKeys.includes(active.resourceKey)
+              ? 'EC2 Added to Resources'
+              : 'Add EC2 to Resources'}
+          </button>
         </div>
 
       </>
@@ -3396,21 +3458,29 @@ function UserDashboard() {
 
               <div className="user-panel" style={{ padding: 18 }}>
 
-                <h3>Resources Added ({resources.length})</h3>
+                <h3>Resources Added ({resources.filter((item) => addedResourceKeys.includes(item.resourceKey)).length})</h3>
 
-                {resources.map((item, index) => (
+                {resources.filter((item) => addedResourceKeys.includes(item.resourceKey)).map((item, index) => (
 
-                  <p key={item.resourceKey}>
+                  <div key={item.resourceKey} style={{ marginBottom: 12 }}>
 
-                    {index + 1}. {item.service || 'Not selected'}
+                    <p>{index + 1}. {item.service || 'Not selected'} — {item.resourceName || 'Unnamed resource'}</p>
 
-                    {' — '}
+                    {item.service === 'VPC' && item.vpcConfiguration?.mode === 'new' && item.vpcConfiguration.subnets.map((subnet, subnetIndex) => (
 
-                    {item.resourceName || 'Unnamed resource'}
+                      <p key={subnet.resourceKey} style={{ margin: '6px 0 6px 24px' }}>
 
-                  </p>
+                        {index + 1}.{subnetIndex + 1}. Subnet — {subnet.name || `Subnet ${subnetIndex + 1}`} ({subnet.subnetType === 'public' ? 'Public' : 'Private'}) · {subnet.availabilityZone || 'AZ not set'} · {subnet.ipv4Cidr || 'CIDR not set'}
+
+                      </p>
+
+                    ))}
+
+                  </div>
 
                 ))}
+
+                {addedResourceKeys.length === 0 && <p>No resources added yet. Configure a VPC or EC2 resource, then add it to Resources.</p>}
 
               </div>
 
@@ -3532,6 +3602,11 @@ function UserDashboard() {
 
               )}
 
+              {message && (
+                <div className="user-message" role="alert" style={{ margin: '16px 0' }}>
+                  {message}
+                </div>
+              )}
               <div className="user-form-actions">
 
                 <button
