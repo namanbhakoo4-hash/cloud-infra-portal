@@ -1,4 +1,3 @@
-
 const express = require('express')
 const crypto = require('crypto')
 const fs = require('fs/promises')
@@ -17,6 +16,10 @@ const {
 const {
   createTerraformFiles
 } = require('../services/terraformService')
+
+const {
+  buildBomCsv
+} = require('../services/bomCsvExportService')
 
 // =====================================================
 // REGION CONFIGURATION FOR SIMULATED WORKFLOW
@@ -365,6 +368,73 @@ router.get(
 
       return res.status(500).json({
         message: 'Failed to fetch BOMs'
+      })
+    }
+  }
+)
+
+// =====================================================
+// USER AND CLOUD ENGINEER: EXPORT BOM CSV
+// =====================================================
+
+router.get(
+  '/:id/export.csv',
+  authMiddleware,
+  roleMiddleware('user', 'cloud_engineer'),
+  async (req, res) => {
+    try {
+      const bom = await BOM.findById(req.params.id)
+        .populate('reviewedBy', 'name')
+
+      if (!bom) {
+        return res.status(404).json({
+          message: 'BOM not found'
+        })
+      }
+
+      if (
+        req.user.role === 'user' &&
+        String(bom.createdBy) !== String(req.user.id)
+      ) {
+        return res.status(403).json({
+          message: 'You do not have permission to export this BOM.'
+        })
+      }
+
+      const csv = await buildBomCsv(bom)
+
+      const safeTicketId = String(bom.ticketId || 'BOM')
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+
+      const filename = `${safeTicketId}.csv`
+
+      res.setHeader(
+        'Content-Type',
+        'text/csv; charset=utf-8'
+      )
+
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`
+      )
+
+      res.setHeader(
+        'Cache-Control',
+        'no-store'
+      )
+
+      return res.send('\uFEFF' + csv)
+    } catch (error) {
+      console.error('BOM CSV export error:', error)
+
+      if (error.name === 'CastError') {
+        return res.status(400).json({
+          message: 'Invalid BOM ID'
+        })
+      }
+
+      return res.status(500).json({
+        message: 'Failed to export BOM CSV'
       })
     }
   }

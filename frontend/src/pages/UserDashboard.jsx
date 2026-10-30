@@ -1,5 +1,4 @@
 
-
 import { useEffect, useRef, useState } from 'react'
 
 import { useNavigate } from 'react-router-dom'
@@ -796,6 +795,47 @@ function UserDashboard() {
 
     })
 
+  }
+
+  async function downloadBomCsv(bom) {
+    try {
+      setMessage('')
+
+      const response = await fetch(
+        `${API}/api/bom/${bom._id}/export.csv`,
+        {
+          headers: authHeaders()
+        }
+      )
+
+      if (!response.ok) {
+        let errorMessage = 'Unable to download BOM CSV.'
+
+        try {
+          const data = await response.json()
+          errorMessage = data.message || errorMessage
+        } catch {
+          errorMessage = 'Unable to download BOM CSV.'
+        }
+
+        throw new Error(errorMessage)
+      }
+
+      const csvBlob = await response.blob()
+      const downloadUrl = window.URL.createObjectURL(csvBlob)
+      const link = document.createElement('a')
+
+      link.href = downloadUrl
+      link.download = `BOM-${String(bom.ticketId || bom._id).replace(/[^A-Za-z0-9_-]/g, '_')}.csv`
+
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+
+      window.URL.revokeObjectURL(downloadUrl)
+    } catch (error) {
+      setMessage(error.message || 'Unable to download BOM CSV.')
+    }
   }
 
   async function loadBoms() {
@@ -3784,23 +3824,25 @@ function UserDashboard() {
                       <td>{bom.engineerRemarks || '—'}</td>
 
                       <td>
-
-                        {bom.status === 'Changes Requested' ? (
-
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                           <button
-
-                            className="user-edit-btn"
-
-                            onClick={() => editBom(bom)}
-
+                            type="button"
+                            className="user-secondary-btn"
+                            onClick={() => downloadBomCsv(bom)}
                           >
-
-                            Edit / Resubmit
-
+                            Download CSV
                           </button>
 
-                        ) : '—'}
-
+                          {bom.status === 'Changes Requested' ? (
+                            <button
+                              type="button"
+                              className="user-edit-btn"
+                              onClick={() => editBom(bom)}
+                            >
+                              Edit / Resubmit
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
 
                       <td>
