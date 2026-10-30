@@ -57,6 +57,8 @@ const newSubnet = (type = 'private', ipv4Cidr = '') => ({
 
   ipv4Cidr,
 
+  usableIpCount: usableIpsForCidr(ipv4Cidr),
+
   subnetType: type,
 
   mapPublicIpOnLaunch: false
@@ -245,15 +247,51 @@ function intToIp(number) {
     .join('.')
 }
 
-function cidrForSubnet(vpcCidr, subnetIndex, prefix = 24) {
-  const vpc = parseCidr(vpcCidr)
-  if (!vpc) return `10.0.${subnetIndex + 1}.0/${prefix}`
+function usableIpsForCidr(cidrValue) {
+  const cidr = parseCidr(cidrValue)
+  if (!cidr) return 251
+  return Math.max(0, (2 ** (32 - cidr.prefix)) - 5)
+}
+
+function prefixForUsableIps(usableIps, vpcPrefix) {
+  const requested = Number(usableIps)
+  if (!Number.isInteger(requested) || requested < 11) return null
+
+  for (let prefix = Math.max(8, Number(vpcPrefix) || 16); prefix <= 28; prefix += 1) {
+    if ((2 ** (32 - prefix)) - 5 >= requested) return prefix
+  }
+
+  return null
+}
+
+function allocateSubnetCidr(vpcCidrValue, subnetList, prefix, excludeIndex = -1) {
+  const vpc = parseCidr(vpcCidrValue)
+  if (!vpc || !Number.isInteger(Number(prefix)) || Number(prefix) < vpc.prefix || Number(prefix) > 28) {
+    return ''
+  }
 
   const blockSize = 2 ** (32 - Number(prefix))
-  const start = (vpc.start + blockSize * (subnetIndex + 1)) >>> 0
-  const alignedStart = Math.floor(start / blockSize) * blockSize
+  const occupied = (subnetList || [])
+    .filter((_, index) => index !== excludeIndex)
+    .map((subnet) => parseCidr(subnet.ipv4Cidr))
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start)
 
-  return `${intToIp(alignedStart >>> 0)}/${prefix}`
+  let candidate = Math.ceil(vpc.start / blockSize) * blockSize
+
+  while (candidate + blockSize - 1 <= vpc.end) {
+    const conflict = occupied.find((item) =>
+      candidate <= item.end && item.start <= candidate + blockSize - 1
+    )
+
+    if (!conflict) {
+      return `${intToIp(candidate >>> 0)}/${prefix}`
+    }
+
+    candidate = Math.ceil((conflict.end + 1) / blockSize) * blockSize
+  }
+
+  return ''
 }
 
 function validateResources(resources, region, instanceTypes) {
@@ -319,9 +357,21 @@ const previousCidrs = []
 
       const cidr = parseCidr(subnet.ipv4Cidr)
 
-      if (!cidr || cidr.prefix < 16 || cidr.prefix > 28) {
+      if (!cidr || cidr.prefix < vpcCidr.prefix || cidr.prefix > 28) {
 
-        return `${subnetLabel}: enter a valid subnet CIDR.`
+        return `${subnetLabel}: enter a valid subnet CIDR within the VPC prefix range.`
+
+      }
+
+      const requestedUsableIps = Number(subnet.usableIpCount)
+
+      if (
+        !Number.isInteger(requestedUsableIps) ||
+        requestedUsableIps < 11 ||
+        requestedUsableIps > usableIpsForCidr(subnet.ipv4Cidr)
+      ) {
+
+        return `${subnetLabel}: enter a usable IP requirement between 11 and the capacity of its selected CIDR.`
 
       }
 
@@ -722,23 +772,37 @@ function UserDashboard() {
   }
 
   function updateSubnet(index, changes) {
+    const currentSubnets = active.vpcConfiguration.subnets || []
+    const currentSubnet = currentSubnets[index]
+    let updatedSubnet = { ...currentSubnet, ...changes }
+
+    if (Object.prototype.hasOwnProperty.call(changes, 'usableIpCount')) {
+      const requested = changes.usableIpCount
+      const prefix = prefixForUsableIps(requested, parseCidr(active.vpcConfiguration.ipv4Cidr)?.prefix)
+
+      if (prefix) {
+        const ipv4Cidr = allocateSubnetCidr(
+          active.vpcConfiguration.ipv4Cidr,
+          currentSubnets,
+          prefix,
+          index
+        )
+        updatedSubnet = {
+          ...updatedSubnet,
+          ipv4Cidr
+        }
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(changes, 'ipv4Cidr')) {
+      updatedSubnet.usableIpCount = usableIpsForCidr(changes.ipv4Cidr)
+    }
 
     updateVpc({
-
-      subnets: active.vpcConfiguration.subnets.map(
-
-        (item, itemIndex) =>
-
-          itemIndex === index
-
-            ? { ...item, ...changes }
-
-            : item
-
+      subnets: currentSubnets.map((item, itemIndex) =>
+        itemIndex === index ? updatedSubnet : item
       )
-
     })
-
   }
 
   function selectService(service) {
@@ -1212,7 +1276,12 @@ function UserDashboard() {
 
               ...defaults.vpcConfiguration,
 
-              ...resource.vpcConfiguration
+              ...resource.vpcConfiguration,
+
+              subnets: (resource.vpcConfiguration?.subnets || defaults.vpcConfiguration.subnets).map((subnet) => ({
+                ...subnet,
+                usableIpCount: subnet.usableIpCount ?? usableIpsForCidr(subnet.ipv4Cidr)
+              }))
 
             }
 
@@ -1306,7 +1375,7 @@ function UserDashboard() {
 
             resourceKey: item.resourceKey,
 
-            resourceName: item.resourceName,
+            resourceName: item.vpcConfiguration?.name || item.vpcConfiguration?.existingVpcId || item.resourceName || 'VPC',
 
             service: 'VPC',
 
@@ -1466,24 +1535,6 @@ function UserDashboard() {
         </div>
 
         <div className="user-form-grid">
-
-          <Field label="VPC Resource Name">
-
-            <input
-
-              value={active.resourceName}
-
-              onChange={(e) =>
-
-                updateActive({ resourceName: e.target.value })
-
-              }
-
-              placeholder="production-network"
-
-            />
-
-          </Field>
 
           <Field label="VPC Option">
 
@@ -1648,7 +1699,10 @@ function UserDashboard() {
 
                         : {
 
-                            ...newSubnet(subnetType, cidrForSubnet(config.ipv4Cidr, index, 24)),
+                            ...newSubnet(
+                              subnetType,
+                              allocateSubnetCidr(config.ipv4Cidr, config.subnets, 24)
+                            ),
 
                             availabilityZone: `${region || 'ap-south-1'}${String.fromCharCode(97 + (index % 26))}`
 
@@ -1860,43 +1914,53 @@ function UserDashboard() {
 
                   </Field>
 
-                                    <Field label="Subnet CIDR Prefix *">
+                                    <Field label="Required Usable IPv4 Addresses *">
+
+                    <input
+                      type="number"
+                      min="11"
+                      step="1"
+                      value={subnet.usableIpCount ?? usableIpsForCidr(subnet.ipv4Cidr)}
+                      onChange={(e) =>
+                        updateSubnet(index, {
+                          usableIpCount: e.target.value
+                        })
+                      }
+                      required
+                    />
+
+                    <small>AWS reserves 5 IPv4 addresses in every subnet. Minimum: 11 usable addresses.</small>
+
+                  </Field>
+
+                  <Field label="Subnet CIDR Prefix *">
 
                     <select
-
-                      value={String(subnet.ipv4Cidr || '10.0.1.0/24').split('/')[1] || '24'}
-
-                      onChange={(e) =>
-
-                        updateSubnet(index, {
-
-                          ipv4Cidr: cidrForSubnet(
-
-                            config.ipv4Cidr,
-
-                            index,
-
-                            Number(e.target.value)
-
-                          )
-
-                        })
-
-                      }
-
+                      value={String(subnet.ipv4Cidr || '').split('/')[1] || '24'}
+                      onChange={(e) => {
+                        const prefix = Number(e.target.value)
+                        const ipv4Cidr = allocateSubnetCidr(
+                          config.ipv4Cidr,
+                          config.subnets,
+                          prefix,
+                          index
+                        )
+                        updateSubnet(index, { ipv4Cidr })
+                      }}
                       required
-
                     >
-
-                      {CIDR_PREFIXES.map((prefix) => (
-
-                        <option key={prefix} value={prefix}>/{prefix}</option>
-
-                      ))}
-
+                      {CIDR_PREFIXES
+                        .filter((prefix) => prefix >= (parseCidr(config.ipv4Cidr)?.prefix || 16))
+                        .map((prefix) => (
+                          <option key={prefix} value={prefix}>/{prefix}</option>
+                        ))}
                     </select>
 
-                    <small>Subnet network address is generated automatically. AWS subnets support /16 through /28.</small>
+                    <small>
+                      Allocated CIDR: {subnet.ipv4Cidr || 'No available CIDR block'}
+                      {' · '}
+                      {subnet.ipv4Cidr ? `${usableIpsForCidr(subnet.ipv4Cidr)} usable IPs` : 'Usable IP capacity unavailable'}
+                    </small>
 
                   </Field>
 
@@ -2081,24 +2145,6 @@ function UserDashboard() {
               }
 
               placeholder="web-server"
-
-            />
-
-          </Field>
-
-          <Field label="Instance Name">
-
-            <input
-
-              value={config.instanceName}
-
-              onChange={(e) =>
-
-                updateEc2({ instanceName: e.target.value })
-
-              }
-
-              placeholder="web-server-01"
 
             />
 
@@ -2524,9 +2570,11 @@ function UserDashboard() {
 
                     >
 
-                      {vpc.resourceName ||
+                      {vpc.vpcConfiguration?.name ||
 
-                        vpc.vpcConfiguration.name ||
+                        vpc.vpcConfiguration?.existingVpcId ||
+
+                        vpc.resourceName ||
 
                         vpc.resourceKey}
 
@@ -3504,7 +3552,7 @@ function UserDashboard() {
 
                   <div key={item.resourceKey} style={{ marginBottom: 12 }}>
 
-                    <p>{index + 1}. {item.service || 'Not selected'} — {item.resourceName || 'Unnamed resource'}</p>
+                    <p>{index + 1}. {item.service || 'Not selected'} — {item.service === 'VPC' ? (item.vpcConfiguration?.name || item.vpcConfiguration?.existingVpcId || 'Unnamed VPC') : (item.resourceName || 'Unnamed resource')}</p>
 
                     {item.service === 'VPC' && item.vpcConfiguration?.mode === 'new' && item.vpcConfiguration.subnets.map((subnet, subnetIndex) => (
 
