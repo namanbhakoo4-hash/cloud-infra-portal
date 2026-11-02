@@ -1,4 +1,3 @@
-
 const mongoose = require('mongoose')
 
 const networkSchema = new mongoose.Schema({
@@ -65,6 +64,57 @@ const vpcConfigurationSchema = new mongoose.Schema({
   existingVpcId: { type: String, trim: true, default: '' }
 }, { _id: false })
 
+const securityGroupRuleSchema = new mongoose.Schema({
+  protocol: {
+    type: String,
+    enum: ['tcp', 'udp', 'icmp', '-1'],
+    required: true
+  },
+  fromPort: {
+    type: Number,
+    min: 1,
+    max: 65535,
+    default: undefined
+  },
+  toPort: {
+    type: Number,
+    min: 1,
+    max: 65535,
+    default: undefined
+  },
+  cidr: {
+    type: String,
+    trim: true,
+    required: true
+  },
+  description: {
+    type: String,
+    trim: true,
+    default: ''
+  }
+}, { _id: false })
+
+const securityGroupConfigurationSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  description: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  ingressRules: {
+    type: [securityGroupRuleSchema],
+    default: []
+  },
+  egressRules: {
+    type: [securityGroupRuleSchema],
+    default: []
+  }
+}, { _id: false })
+
 const ec2NetworkSchema = new mongoose.Schema({
   vpcSource: {
     type: String,
@@ -76,7 +126,19 @@ const ec2NetworkSchema = new mongoose.Schema({
   subnetResourceKey: { type: String, default: '' },
   subnetId: { type: String, default: '' },
   associatePublicIpAddress: { type: Boolean, default: false },
-  securityGroupIds: { type: [String], default: [] }
+  securityGroupMode: {
+    type: String,
+    enum: ['existing', 'new'],
+    default: 'existing'
+  },
+  securityGroupIds: {
+    type: [String],
+    default: []
+  },
+  securityGroup: {
+    type: securityGroupConfigurationSchema,
+    default: undefined
+  }
 }, { _id: false })
 
 const ec2ConfigurationSchema = new mongoose.Schema({

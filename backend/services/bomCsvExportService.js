@@ -89,11 +89,47 @@ function csvValue(value) {
   return `"${text.replace(/"/g, '""')}"`
 }
 
+function hasCsvValue(value) {
+  if (value === undefined || value === null) {
+    return false
+  }
+
+  if (typeof value === 'string') {
+    return value.trim().length > 0
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value)
+  }
+
+  if (typeof value === 'boolean') {
+    return true
+  }
+
+  if (value instanceof Date) {
+    return !Number.isNaN(value.getTime())
+  }
+
+  if (Array.isArray(value)) {
+    return value.some(hasCsvValue)
+  }
+
+  if (typeof value === 'object') {
+    return Object.values(value).some(hasCsvValue)
+  }
+
+  return String(value).trim().length > 0
+}
+
 function createCsv(rows) {
-  const header = CSV_COLUMNS.map(csvValue).join(',')
+  const columns = CSV_COLUMNS.filter((column) =>
+    rows.some((row) => hasCsvValue(row[column]))
+  )
+
+  const header = columns.map(csvValue).join(',')
 
   const records = rows.map((row) =>
-    CSV_COLUMNS.map((column) =>
+    columns.map((column) =>
       csvValue(row[column])
     ).join(',')
   )

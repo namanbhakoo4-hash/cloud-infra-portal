@@ -1,4 +1,3 @@
-
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
@@ -22,7 +21,6 @@ function required(value, label) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`${label} is required`)
   }
-
   return value.trim()
 }
 
@@ -30,7 +28,6 @@ function terraformName(value) {
   const result = String(value || 'resource')
     .replace(/[^a-zA-Z0-9_]/g, '_')
     .replace(/^[^a-zA-Z_]/, '_')
-
   return result || 'resource'
 }
 
@@ -87,14 +84,12 @@ function validateAwsCidr(value, label) {
 function containsCidr(parent, child) {
   const a = parseCidr(parent)
   const b = parseCidr(child)
-
   return b.start >= a.start && b.end <= a.end
 }
 
 function overlapsCidr(first, second) {
   const a = parseCidr(first)
   const b = parseCidr(second)
-
   return a.start <= b.end && b.start <= a.end
 }
 
@@ -116,9 +111,11 @@ function normalizeResourceKey(resource, index) {
 
 function getAmiConfiguration(operatingSystem, operatingSystemType) {
   const family = String(operatingSystem || 'Linux').trim().toLowerCase()
+
   const selectedType = String(
     operatingSystemType || (family === 'windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS')
   ).trim()
+
   const type = selectedType.toLowerCase()
 
   if (family === 'windows') {
@@ -247,7 +244,6 @@ function createTerraformFiles(bom) {
     seenKeys.add(key)
   })
 
-  // PASS 1: Generate independent VPC resources and their subnets.
   resources.forEach((resource, index) => {
     const service = String(resource.service || '').toUpperCase()
 
@@ -337,6 +333,7 @@ resource "aws_vpc" "${label}" {
       }
 
       const subnetLabel = `${label}_subnet_${subnetIndex + 1}`
+
       const availabilityZone = required(
         subnet.availabilityZone,
         'Subnet availability zone'
@@ -348,8 +345,6 @@ resource "aws_vpc" "${label}" {
         )
       }
 
-      // This validates the AZ format only. It does not confirm live
-      // availability in an AWS account.
       blocks.push(`
 resource "aws_subnet" "${subnetLabel}" {
   vpc_id                  = ${vpcRef}
@@ -497,6 +492,7 @@ resource "aws_nat_gateway" "${natLabel}" {
 `)
 
         addPlanned('aws_eip', eipLabel)
+
         addPlanned('aws_nat_gateway', natLabel, {
           connectivityType: 'public'
         })
@@ -536,7 +532,6 @@ resource "aws_route_table_association" "${associationLabel}" {
     }
   })
 
-  // PASS 2: Generate EC2 resources after VPC and subnet references exist.
   resources.forEach((resource, index) => {
     const service = String(resource.service || '').toUpperCase()
 
@@ -554,7 +549,9 @@ resource "aws_route_table_association" "${associationLabel}" {
 
     const network = config.network || {}
     const source = network.vpcSource || 'bom'
+
     let subnetRef
+    let vpcRef
 
     if (source === 'bom') {
       const vpcKey = required(
@@ -582,8 +579,11 @@ resource "aws_route_table_association" "${associationLabel}" {
       }
 
       subnetRef = subnet.subnetRef
+      vpcRef = vpcReferences.get(vpcKey)
     } else if (source === 'existing') {
       validateId(network.vpcId, 'vpc', 'existing VPC ID')
+      vpcRef = hcl(network.vpcId)
+
       subnetRef = hcl(
         validateId(network.subnetId, 'subnet', 'existing subnet ID')
       )
@@ -606,13 +606,148 @@ resource "aws_route_table_association" "${associationLabel}" {
       resource.resourceName ||
       `ec2-${index + 1}`
 
+    const securityGroupMode = network.securityGroupMode || 'existing'
     const groups = network.securityGroupIds || []
+    let securityGroupIdsExpression = '[]'
 
-    if (!Array.isArray(groups)) {
-      throw new Error('Security groups must be an array')
+    if (securityGroupMode === 'new') {
+      const securityGroup = network.securityGroup || {}
+
+      const securityGroupName = required(
+        securityGroup.name,
+        'Security group name'
+      )
+
+      const securityGroupDescription = required(
+        securityGroup.description,
+        'Security group description'
+      )
+
+      const securityGroupLabel = terraformName(`security_group_${index + 1}`)
+      const ingressRules = securityGroup.ingressRules || []
+      const egressRules = securityGroup.egressRules || []
+
+      if (!/^[A-Za-z0-9._-]{1,255}$/.test(securityGroupName)) {
+        throw new Error('Security group name must contain only letters, numbers, dots, underscores, or hyphens and be 1-255 characters long')
+      }
+
+      if (!Array.isArray(ingressRules) || !Array.isArray(egressRules)) {
+        throw new Error('Security group inbound and outbound rules must be arrays')
+      }
+
+      function renderSecurityGroupRule(rule, direction, ruleIndex) {
+        const protocol = String(rule.protocol || '').toLowerCase()
+
+        if (!['tcp', 'udp', 'icmp', '-1'].includes(protocol)) {
+          throw new Error(`Invalid ${direction} rule protocol at position ${ruleIndex + 1}`)
+        }
+
+        const cidr = required(
+          rule.cidr,
+          `${direction} rule ${ruleIndex + 1} CIDR`
+        )
+
+        parseCidr(cidr)
+
+        let ports = ''
+
+        if (protocol === 'tcp' || protocol === 'udp') {
+          const fromPort = Number(rule.fromPort)
+          const toPort = Number(rule.toPort)
+
+          if (
+            !Number.isInteger(fromPort) ||
+            !Number.isInteger(toPort) ||
+            fromPort < 1 ||
+            fromPort > 65535 ||
+            toPort < 1 ||
+            toPort > 65535 ||
+            fromPort > toPort
+          ) {
+            throw new Error(`${direction} rule ${ruleIndex + 1} must have a valid port range between 1 and 65535`)
+          }
+
+          ports = `
+    from_port   = ${fromPort}
+    to_port     = ${toPort}`
+        } else if (protocol === 'icmp') {
+          ports = `
+    from_port   = -1
+    to_port     = -1`
+        } else if (protocol === '-1') {
+          ports = `
+    from_port   = 0
+    to_port     = 0`
+        }
+
+        if (
+          direction === 'inbound' &&
+          protocol === 'tcp' &&
+          cidr === '0.0.0.0/0'
+        ) {
+          const fromPort = Number(rule.fromPort)
+          const toPort = Number(rule.toPort)
+
+          if (fromPort <= 22 && toPort >= 22) {
+            warnings.push(`${name}: inbound SSH is open to 0.0.0.0/0. Restrict access to trusted IP ranges.`)
+          }
+
+          if (fromPort <= 3389 && toPort >= 3389) {
+            warnings.push(`${name}: inbound RDP is open to 0.0.0.0/0. Restrict access to trusted IP ranges.`)
+          }
+        }
+
+        return `
+  ${direction === 'inbound' ? 'ingress' : 'egress'} {
+    protocol    = ${hcl(protocol)}${ports}
+    cidr_blocks = [${hcl(cidr)}]${rule.description ? `
+    description = ${hcl(rule.description)}` : ''}
+  }`
+      }
+
+      const ingressBlocks = ingressRules
+        .map((rule, ruleIndex) => renderSecurityGroupRule(rule, 'inbound', ruleIndex))
+        .join('')
+
+      const egressBlocks = egressRules
+        .map((rule, ruleIndex) => renderSecurityGroupRule(rule, 'outbound', ruleIndex))
+        .join('')
+
+      if (egressRules.length === 0) {
+        warnings.push(`${name}: no outbound rules were specified. AWS will retain its default allow-all outbound rule.`)
+      }
+
+      blocks.push(`
+resource "aws_security_group" "${securityGroupLabel}" {
+  name        = ${hcl(securityGroupName)}
+  description = ${hcl(securityGroupDescription)}
+  vpc_id      = ${vpcRef}
+${ingressBlocks}
+${egressBlocks}
+  tags = {
+    Name = ${hcl(securityGroupName)}
+  }
+}
+`)
+
+      addPlanned('aws_security_group', securityGroupLabel, {
+        securityGroupName,
+        vpcSource: source,
+        ingressRules: ingressRules.length,
+        egressRules: egressRules.length
+      })
+
+      securityGroupIdsExpression = `[aws_security_group.${securityGroupLabel}.id]`
+    } else if (securityGroupMode === 'existing') {
+      if (!Array.isArray(groups)) {
+        throw new Error('Security groups must be an array')
+      }
+
+      groups.forEach(group => validateId(group, 'sg', 'security group ID'))
+      securityGroupIdsExpression = tfList(groups)
+    } else {
+      throw new Error(`Unsupported security group mode: ${securityGroupMode}`)
     }
-
-    groups.forEach(group => validateId(group, 'sg', 'security group ID'))
 
     const rootVolume = (resource.ebsVolumes || [])
       .find(volume => volume.deviceName === 'root') ||
@@ -662,6 +797,7 @@ resource "aws_route_table_association" "${associationLabel}" {
       config.operatingSystem || resource.operatingSystem || 'Linux',
       config.operatingSystemType || resource.operatingSystemType
     )
+
     const amiLabel = `ami_${terraformName(amiConfig.name)}`
 
     if (!amiConfigurations.has(amiLabel)) {
@@ -711,7 +847,7 @@ module "${moduleLabel}" {
   associate_public_ip_address = ${tfBool(
     network.associatePublicIpAddress === true
   )}
-  security_group_ids          = ${tfList(groups)}
+  security_group_ids          = ${securityGroupIdsExpression}
   key_pair_name               = ${
     config.keyPairName ? hcl(config.keyPairName) : 'null'
   }

@@ -159,7 +159,21 @@ const newEc2 = () => ({
 
       associatePublicIpAddress: false,
 
-      securityGroupIds: []
+      securityGroupMode: 'existing',
+
+      securityGroupIds: [],
+
+      securityGroup: {
+
+        name: '',
+
+        description: '',
+
+        ingressRules: [],
+
+        egressRules: []
+
+      }
 
     },
 
@@ -547,9 +561,79 @@ const previousCidrs = []
 
     }
 
-    if (
+    if (network.securityGroupMode === 'new') {
 
-      network.securityGroupIds.some(
+      const securityGroup = network.securityGroup || {}
+
+      if (!/^[A-Za-z0-9._-]{1,255}$/.test(securityGroup.name || '')) {
+
+        return `${label}: enter a valid security group name (letters, numbers, dots, underscores or hyphens).`
+
+      }
+
+      if (!String(securityGroup.description || '').trim()) {
+
+        return `${label}: enter a security group description.`
+
+      }
+
+      for (const [direction, rules] of [
+
+        ['inbound', securityGroup.ingressRules || []],
+
+        ['outbound', securityGroup.egressRules || []]
+
+      ]) {
+
+        for (const [ruleIndex, rule] of rules.entries()) {
+
+          const ruleLabel = `${label}: ${direction} rule ${ruleIndex + 1}`
+
+          if (!rule.protocol || !String(rule.cidr || '').trim()) {
+
+            return `${ruleLabel}: select a protocol and enter a CIDR destination/source.`
+
+          }
+
+          if (rule.protocol === 'tcp' || rule.protocol === 'udp') {
+
+            const fromPort = Number(rule.fromPort)
+
+            const toPort = Number(rule.toPort)
+
+            if (
+
+              !Number.isInteger(fromPort) ||
+
+              !Number.isInteger(toPort) ||
+
+              fromPort < 1 ||
+
+              toPort > 65535 ||
+
+              fromPort > toPort
+
+            ) {
+
+              return `${ruleLabel}: enter a valid port range between 1 and 65535.`
+
+            }
+
+          }
+
+          if (!parseCidr(rule.cidr)) {
+
+            return `${ruleLabel}: enter a valid IPv4 CIDR.`
+
+          }
+
+        }
+
+      }
+
+    } else if (
+
+      (network.securityGroupIds || []).some(
 
         (id) => !awsId(id, 'sg')
 
@@ -2730,41 +2814,365 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="Security Group IDs">
+          <Field label="Security Group Configuration">
 
-            <input
+            <select
 
-              value={network.securityGroupIds.join(', ')}
+              value={network.securityGroupMode || 'existing'}
 
               onChange={(e) =>
 
                 updateEc2Network({
 
-                  securityGroupIds: e.target.value
+                  securityGroupMode: e.target.value,
 
-                    .split(',')
+                  securityGroupIds: e.target.value === 'existing'
 
-                    .map((item) => item.trim())
+                    ? network.securityGroupIds || []
 
-                    .filter(Boolean)
+                    : [],
+
+                  securityGroup: network.securityGroup || {
+
+                    name: '',
+
+                    description: '',
+
+                    ingressRules: [],
+
+                    egressRules: []
+
+                  }
 
                 })
 
               }
 
-              placeholder="sg-0123456789abcdef0"
+            >
 
-            />
+              <option value="existing">Use Existing Security Group</option>
+
+              <option value="new">Create New Security Group</option>
+
+            </select>
 
             <small>
 
-              Separate multiple existing security group IDs
-
-              with commas.
+              Choose an existing AWS security group or define a new one for this EC2 resource.
 
             </small>
 
           </Field>
+
+          {(network.securityGroupMode || 'existing') === 'existing' ? (
+
+            <Field label="Existing Security Group IDs">
+
+              <input
+
+                value={(network.securityGroupIds || []).join(', ')}
+
+                onChange={(e) =>
+
+                  updateEc2Network({
+
+                    securityGroupIds: e.target.value
+
+                      .split(',')
+
+                      .map((item) => item.trim())
+
+                      .filter(Boolean)
+
+                  })
+
+                }
+
+                placeholder="sg-0123456789abcdef0"
+
+              />
+
+              <small>
+
+                Enter one or more existing security group IDs, separated by commas.
+
+              </small>
+
+            </Field>
+
+          ) : (
+
+            <div className="user-panel" style={{ gridColumn: '1 / -1', padding: 18 }}>
+
+              <div className="user-form-section-title">New Security Group Details</div>
+
+              <div className="user-form-grid">
+
+                <Field label="Security Group Name *">
+
+                  <input
+
+                    value={network.securityGroup?.name || ''}
+
+                    maxLength="255"
+
+                    onChange={(e) => updateEc2Network({
+
+                      securityGroup: {
+
+                        ...(network.securityGroup || {}),
+
+                        name: e.target.value
+
+                      }
+
+                    })}
+
+                    placeholder="web-application-sg"
+
+                  />
+
+                </Field>
+
+                <Field label="Description *">
+
+                  <input
+
+                    value={network.securityGroup?.description || ''}
+
+                    onChange={(e) => updateEc2Network({
+
+                      securityGroup: {
+
+                        ...(network.securityGroup || {}),
+
+                        description: e.target.value
+
+                      }
+
+                    })}
+
+                    placeholder="Security group for the web application"
+
+                  />
+
+                </Field>
+
+              </div>
+
+              {[
+
+                ['ingressRules', 'Inbound Rules', 'Source'],
+
+                ['egressRules', 'Outbound Rules', 'Destination']
+
+              ].map(([field, title, endpointLabel]) => (
+
+                <div key={field} style={{ marginTop: 18 }}>
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+
+                    <h3>{title}</h3>
+
+                    <button
+
+                      type="button"
+
+                      className="user-secondary-btn"
+
+                      onClick={() => updateEc2Network({
+
+                        securityGroup: {
+
+                          ...(network.securityGroup || {}),
+
+                          [field]: [
+
+                            ...(network.securityGroup?.[field] || []),
+
+                            {
+
+                              protocol: 'tcp',
+
+                              fromPort: '443',
+
+                              toPort: '443',
+
+                              cidr: '',
+
+                              description: ''
+
+                            }
+
+                          ]
+
+                        }
+
+                      })}
+
+                    >
+
+                      + Add Rule
+
+                    </button>
+
+                  </div>
+
+                  {(network.securityGroup?.[field] || []).length === 0 ? (
+
+                    <p style={{ color: '#64748b', fontSize: 13 }}>
+
+                      No {title.toLowerCase()} configured. Add rules to define permitted traffic.
+
+                    </p>
+
+                  ) : null}
+
+                  {(network.securityGroup?.[field] || []).map((rule, ruleIndex) => (
+
+                    <div key={`${field}-${ruleIndex}`} className="user-panel" style={{ padding: 14, marginBottom: 12 }}>
+
+                      <div className="user-form-grid">
+
+                        <Field label="Protocol">
+
+                          <select
+
+                            value={rule.protocol}
+
+                            onChange={(e) => {
+
+                              const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                              nextRules[ruleIndex] = {
+
+                                ...rule,
+
+                                protocol: e.target.value,
+
+                                fromPort: e.target.value === 'tcp' || e.target.value === 'udp' ? '443' : '',
+
+                                toPort: e.target.value === 'tcp' || e.target.value === 'udp' ? '443' : ''
+
+                              }
+
+                              updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                            }}
+
+                          >
+
+                            <option value="tcp">TCP</option>
+
+                            <option value="udp">UDP</option>
+
+                            <option value="icmp">ICMP</option>
+
+                            <option value="-1">All traffic</option>
+
+                          </select>
+
+                        </Field>
+
+                        {(rule.protocol === 'tcp' || rule.protocol === 'udp') && (
+
+                          <>
+
+                            <Field label="From Port">
+
+                              <input type="number" min="1" max="65535" value={rule.fromPort} onChange={(e) => {
+
+                                const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                                nextRules[ruleIndex] = { ...rule, fromPort: e.target.value }
+
+                                updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                              }} />
+
+                            </Field>
+
+                            <Field label="To Port">
+
+                              <input type="number" min="1" max="65535" value={rule.toPort} onChange={(e) => {
+
+                                const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                                nextRules[ruleIndex] = { ...rule, toPort: e.target.value }
+
+                                updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                              }} />
+
+                            </Field>
+
+                          </>
+
+                        )}
+
+                        <Field label={`${endpointLabel} IPv4 CIDR *`}>
+
+                          <input value={rule.cidr} onChange={(e) => {
+
+                            const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                            nextRules[ruleIndex] = { ...rule, cidr: e.target.value }
+
+                            updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                          }} placeholder="10.0.0.0/16" />
+
+                        </Field>
+
+                        <Field label="Rule Description">
+
+                          <input value={rule.description || ''} onChange={(e) => {
+
+                            const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                            nextRules[ruleIndex] = { ...rule, description: e.target.value }
+
+                            updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                          }} placeholder="Allow application traffic" />
+
+                        </Field>
+
+                      </div>
+
+                      <button type="button" className="user-secondary-btn" style={{ marginTop: 10 }} onClick={() => updateEc2Network({
+
+                        securityGroup: {
+
+                          ...network.securityGroup,
+
+                          [field]: (network.securityGroup?.[field] || []).filter((_, index) => index !== ruleIndex)
+
+                        }
+
+                      })}>
+
+                        Remove Rule
+
+                      </button>
+
+                    </div>
+
+                  ))}
+
+                </div>
+
+              ))}
+
+              <small style={{ display: 'block', marginTop: 12, color: '#64748b' }}>
+
+                Use restricted CIDR ranges. Avoid 0.0.0.0/0 for administrative ports such as SSH (22) and RDP (3389).
+
+              </small>
+
+            </div>
+
+          )}
 
         </div>
 
@@ -2996,17 +3404,7 @@ function UserDashboard() {
 
           </div>
 
-          <button
 
-            className="user-primary-btn"
-
-            onClick={createNew}
-
-          >
-
-            + New BOM Request
-
-          </button>
 
         </div>
 
