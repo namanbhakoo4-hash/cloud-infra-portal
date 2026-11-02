@@ -5,6 +5,8 @@ import { useNavigate } from 'react-router-dom'
 
 import './UserDashboard.css'
 
+import './ExistingSubnetButtons.css'
+
 const API = 'http://localhost:5000'
 
 const PROVIDERS = {
@@ -101,7 +103,11 @@ const newVpc = () => ({
 
     natGatewayMode: 'none',
 
-    existingVpcId: ''
+    existingVpcId: '',
+
+    existingSubnets: [{ resourceKey: newKey(), subnetId: '', subnetType: 'private' }],
+
+    existingRouteTableId: ''
 
   }
 
@@ -341,9 +347,31 @@ function validateResources(resources, region, instanceTypes) {
     if (config.mode === 'existing') {
 
       if (!awsId(config.existingVpcId, 'vpc')) {
-
         return `${label}: enter a valid existing VPC ID.`
+      }
 
+      if (!Array.isArray(config.existingSubnets) || config.existingSubnets.length === 0) {
+        return `${label}: add at least one existing subnet ID.`
+      }
+
+      for (const [subnetIndex, subnet] of config.existingSubnets.entries()) {
+        if (!awsId(subnet.subnetId, 'subnet')) {
+          return `${label}: enter a valid subnet ID for existing subnet ${subnetIndex + 1}.`
+        }
+        if (!subnet.resourceKey) {
+          return `${label}: an existing subnet is missing its resource key.`
+        }
+        if (subnets.has(subnet.resourceKey)) {
+          return `${label}: duplicate existing subnet entry.`
+        }
+        subnets.set(subnet.resourceKey, {
+          vpcKey: resource.resourceKey,
+          type: subnet.subnetType || 'private'
+        })
+      }
+
+      if (config.existingRouteTableId && !awsId(config.existingRouteTableId, 'rtb')) {
+        return `${label}: enter a valid existing route table ID or leave it blank.`
       }
 
       vpcs.set(resource.resourceKey, resource)
@@ -521,10 +549,8 @@ const previousCidrs = []
 
       const subnet = subnets.get(network.subnetResourceKey)
 
-      if (!vpc || vpc.vpcConfiguration.mode !== 'new') {
-
-        return `${label}: select a newly created VPC in this BOM.`
-
+      if (!vpc) {
+        return `${label}: select a VPC resource in this BOM.`
       }
 
       if (!subnet || subnet.vpcKey !== network.vpcResourceKey) {
@@ -747,9 +773,7 @@ function UserDashboard() {
 
     (item) =>
 
-      item.service === 'VPC' &&
-
-      item.vpcConfiguration?.mode === 'new'
+      item.service === 'VPC'
 
   )
 
@@ -763,9 +787,15 @@ function UserDashboard() {
 
   )
 
-  const selectedSubnets =
-
-    selectedVpc?.vpcConfiguration?.subnets || []
+  const selectedSubnets = selectedVpc
+    ? selectedVpc.vpcConfiguration?.mode === 'existing'
+      ? (selectedVpc.vpcConfiguration.existingSubnets || []).map((subnet, index) => ({
+          resourceKey: subnet.resourceKey,
+          name: subnet.name || `Existing subnet ${index + 1}`,
+          subnetType: subnet.subnetType || 'private'
+        }))
+      : selectedVpc.vpcConfiguration?.subnets || []
+    : []
 
   const cpuOptions = [...new Set(
 
@@ -1644,23 +1674,99 @@ function UserDashboard() {
 
           {config.mode === 'existing' ? (
 
-            <Field label="Existing VPC ID *">
+            <>
+              <Field label="Existing VPC ID *">
+                <input
+                  value={config.existingVpcId}
+                  onChange={(e) => updateVpc({ existingVpcId: e.target.value })}
+                  placeholder="vpc-0123456789abcdef0"
+                />
+              </Field>
+              <Field label="Existing Route Table ID (Optional)">
+                <input
+                  value={config.existingRouteTableId || ''}
+                  onChange={(e) => updateVpc({ existingRouteTableId: e.target.value })}
+                  placeholder="rtb-0123456789abcdef0"
+                />
+              </Field>
+              <div className="user-form-field existing-subnets-section" style={{ gridColumn: '1 / -1' }}>
+                <label>Existing Subnets *</label>
 
-              <input
+                <div className="existing-subnets-list">
+                  {(config.existingSubnets || []).map((subnet, index) => (
+                    <div className="existing-subnet-item" key={subnet.resourceKey || index}>
+                      <div className="user-form-grid">
+                        <Field label={`Subnet ${index + 1} ID *`}>
+                          <input
+                            value={subnet.subnetId || ''}
+                            onChange={(e) => updateVpc({
+                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, subnetId: e.target.value } : item
+                              )
+                            })}
+                            placeholder="subnet-0123456789abcdef0"
+                          />
+                        </Field>
 
-                value={config.existingVpcId}
+                        <Field label="Subnet Type">
+                          <select
+                            value={subnet.subnetType || 'private'}
+                            onChange={(e) => updateVpc({
+                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, subnetType: e.target.value } : item
+                              )
+                            })}
+                          >
+                            <option value="private">Private</option>
+                            <option value="public">Public</option>
+                          </select>
+                        </Field>
+                      </div>
 
-                onChange={(e) =>
+                      <div className="existing-subnet-item-actions">
+                        <button
+                          type="button"
+                          className="existing-subnet-remove"
+                          onClick={() => updateVpc({
+                            existingSubnets: (config.existingSubnets || []).filter(
+                              (_, itemIndex) => itemIndex !== index
+                            )
+                          })}
+                        >
+                          <span className="existing-subnet-button-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M3 6h18" />
+                              <path d="M8 6V4h8v2" />
+                              <path d="m19 6-1 14H6L5 6" />
+                              <path d="M10 11v5M14 11v5" />
+                            </svg>
+                          </span>
+                          Remove subnet
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
 
-                  updateVpc({ existingVpcId: e.target.value })
-
-                }
-
-                placeholder="vpc-0123456789abcdef0"
-
-              />
-
-            </Field>
+                <button
+                  type="button"
+                  className="existing-subnet-add"
+                  onClick={() => updateVpc({
+                    existingSubnets: [
+                      ...(config.existingSubnets || []),
+                      { resourceKey: newKey(), subnetId: '', subnetType: 'private' }
+                    ]
+                  })}
+                >
+                  <span className="existing-subnet-button-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </span>
+                  Add existing subnet
+                </button>
+              </div>
+            </>
 
           ) : (
 

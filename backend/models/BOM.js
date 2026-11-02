@@ -25,6 +25,16 @@ const vpcSubnetSchema = new mongoose.Schema({
   mapPublicIpOnLaunch: { type: Boolean, default: false }
 }, { _id: false })
 
+const existingVpcSubnetSchema = new mongoose.Schema({
+  resourceKey: { type: String, trim: true, default: '' },
+  subnetId: { type: String, trim: true, default: '' },
+  subnetType: {
+    type: String,
+    enum: ['public', 'private'],
+    default: 'private'
+  }
+}, { _id: false })
+
 const vpcConfigurationSchema = new mongoose.Schema({
   mode: {
     type: String,
@@ -43,6 +53,15 @@ const vpcConfigurationSchema = new mongoose.Schema({
   publicQuantity: { type: Number, min: 0, max: 100, default: 0 },
   privateQuantity: { type: Number, min: 0, max: 100, default: 0 },
   subnets: { type: [vpcSubnetSchema], default: [] },
+  existingSubnets: {
+    type: [existingVpcSubnetSchema],
+    default: []
+  },
+  existingRouteTableId: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   createInternetGateway: { type: Boolean, default: false },
   natGatewayMode: {
     type: String,

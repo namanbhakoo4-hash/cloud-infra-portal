@@ -129,10 +129,64 @@ function normalizeResources(resources, region) {
       )
     }
 
-    if (config.mode && config.mode !== 'new') {
-      throw new Error(
-        'New BOM submissions must create a new VPC. Existing VPC selection is not supported in the new form.'
-      )
+    if ((config.mode || 'new') === 'existing') {
+      const existingVpcId = String(config.existingVpcId || '').trim()
+      const awsVpcIdPattern = /^vpc-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+      const awsSubnetIdPattern = /^subnet-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+      const awsRouteTableIdPattern = /^rtb-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+
+      if (!awsVpcIdPattern.test(existingVpcId)) {
+        throw new Error(`Existing VPC ID for resource ${index + 1} is invalid.`)
+      }
+
+      if (!Array.isArray(config.existingSubnets) || config.existingSubnets.length === 0) {
+        throw new Error(`Add at least one existing subnet to resource ${index + 1}.`)
+      }
+
+      const existingSubnets = config.existingSubnets.map((subnet, subnetIndex) => {
+        const subnetId = String(subnet.subnetId || '').trim()
+        const subnetKey = String(subnet.resourceKey || `${resourceKey}_existing_subnet_${subnetIndex + 1}`).trim()
+        const subnetType = String(subnet.subnetType || 'private').toLowerCase()
+
+        if (!awsSubnetIdPattern.test(subnetId)) {
+          throw new Error(`Existing subnet ${subnetIndex + 1} for resource ${index + 1} has an invalid subnet ID.`)
+        }
+
+        if (!/^[a-zA-Z0-9_-]+$/.test(subnetKey)) {
+          throw new Error(`Existing subnet ${subnetIndex + 1} has an invalid resource key.`)
+        }
+
+        if (!['public', 'private'].includes(subnetType)) {
+          throw new Error(`Existing subnet ${subnetIndex + 1} has an invalid subnet type.`)
+        }
+
+        return { resourceKey: subnetKey, subnetId, subnetType }
+      })
+
+      if (config.existingRouteTableId && !awsRouteTableIdPattern.test(String(config.existingRouteTableId).trim())) {
+        throw new Error(`Existing route table ID for resource ${index + 1} is invalid.`)
+      }
+
+      const subnetKeys = new Set()
+      for (const subnet of existingSubnets) {
+        if (subnetKeys.has(subnet.resourceKey)) {
+          throw new Error(`Duplicate existing subnet key: ${subnet.resourceKey}`)
+        }
+        subnetKeys.add(subnet.resourceKey)
+      }
+
+      return {
+        ...resource,
+        resourceKey,
+        service,
+        vpcConfiguration: {
+          ...config,
+          mode: 'existing',
+          existingVpcId,
+          existingSubnets,
+          existingRouteTableId: String(config.existingRouteTableId || '').trim()
+        }
+      }
     }
 
     const ipv4Cidr = String(config.ipv4Cidr || '').trim()
