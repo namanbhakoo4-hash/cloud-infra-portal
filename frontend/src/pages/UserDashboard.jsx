@@ -278,9 +278,10 @@ function usableIpsForCidr(cidrValue) {
 
 function prefixForUsableIps(usableIps, vpcPrefix) {
   const requested = Number(usableIps)
-  if (!Number.isInteger(requested) || requested < 11) return null
+  const minimumPrefix = Math.max(8, Number(vpcPrefix) || 16)
+  if (!Number.isInteger(requested) || requested < 11 || minimumPrefix > 28) return null
 
-  for (let prefix = Math.max(8, Number(vpcPrefix) || 16); prefix <= 28; prefix += 1) {
+  for (let prefix = 28; prefix >= minimumPrefix; prefix -= 1) {
     if ((2 ** (32 - prefix)) - 5 >= requested) return prefix
   }
 
@@ -825,6 +826,12 @@ function UserDashboard() {
 
   const [regions, setRegions] = useState([])
 
+  const [availabilityZones, setAvailabilityZones] = useState([])
+
+  const [availabilityZonesLoading, setAvailabilityZonesLoading] = useState(false)
+
+  const [availabilityZonesError, setAvailabilityZonesError] = useState('')
+
   const [instanceTypes, setInstanceTypes] = useState([])
 
   const [masterDataLoading, setMasterDataLoading] = useState(false)
@@ -1276,6 +1283,54 @@ function UserDashboard() {
     initialize()
 
   }, [])
+
+  useEffect(() => {
+    if (!showForm || cloudProvider !== 'aws' || !region) {
+      setAvailabilityZones([])
+      setAvailabilityZonesError('')
+      setAvailabilityZonesLoading(false)
+      return
+    }
+
+    const controller = new AbortController()
+
+    async function loadAvailabilityZones() {
+      setAvailabilityZonesLoading(true)
+      setAvailabilityZonesError('')
+
+      try {
+        const response = await fetch(
+          `${API}/api/master-data/availability-zones?region=${encodeURIComponent(region)}`,
+          {
+            headers: authHeaders(),
+            cache: 'no-store',
+            signal: controller.signal
+          }
+        )
+
+        const data = await response.json()
+
+        if (!response.ok) {
+          throw new Error(data.message || 'Unable to load AWS Availability Zones.')
+        }
+
+        setAvailabilityZones(Array.isArray(data.availabilityZones) ? data.availabilityZones : [])
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          setAvailabilityZones([])
+          setAvailabilityZonesError(error.message || 'Unable to load AWS Availability Zones.')
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setAvailabilityZonesLoading(false)
+        }
+      }
+    }
+
+    loadAvailabilityZones()
+
+    return () => controller.abort()
+  }, [showForm, cloudProvider, region])
 
   useEffect(() => {
 
@@ -1997,7 +2052,7 @@ function UserDashboard() {
                               allocateSubnetCidr(config.ipv4Cidr, config.subnets, 24)
                             ),
 
-                            availabilityZone: `${region || 'ap-south-1'}${String.fromCharCode(97 + (index % 26))}`
+                            availabilityZone: availabilityZones[index % (availabilityZones.length || 1)]?.zoneName || ''
 
                           }
 
@@ -2187,23 +2242,42 @@ function UserDashboard() {
 
                   <Field label="Availability Zone *">
 
-                    <input
-
-                      value={subnet.availabilityZone}
-
+                    <select
+                      value={subnet.availabilityZone || ''}
                       onChange={(e) =>
-
                         updateSubnet(index, {
-
                           availabilityZone: e.target.value
-
                         })
-
                       }
-
-                      placeholder={`${region || 'ap-south-1'}a`}
-
-                    />
+                      disabled={availabilityZonesLoading || availabilityZones.length === 0}
+                      required
+                    >
+                      <option value="">
+                        {availabilityZonesLoading
+                          ? 'Loading Availability Zones...'
+                          : availabilityZones.length
+                            ? 'Select Availability Zone'
+                            : 'No Availability Zones available'}
+                      </option>
+                      {subnet.availabilityZone &&
+                        !availabilityZones.some((zone) => zone.zoneName === subnet.availabilityZone) && (
+                          <option value={subnet.availabilityZone}>
+                            {subnet.availabilityZone} (saved value)
+                          </option>
+                        )}
+                      {availabilityZones.map((zone) => (
+                        <option key={zone.zoneName} value={zone.zoneName}>
+                          {zone.zoneName}
+                        </option>
+                      ))}
+                    </select>
+                    {availabilityZonesError ? (
+                      <small style={{ color: '#b91c1c' }}>{availabilityZonesError}</small>
+                    ) : (
+                      <small>
+                        Development catalogue only. These are sample zone names, not live AWS account availability.
+                      </small>
+                    )}
 
                   </Field>
 

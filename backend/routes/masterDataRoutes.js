@@ -1,4 +1,3 @@
-
 const express = require('express')
 
 const MasterData = require('../models/MasterData')
@@ -8,6 +7,14 @@ const roleMiddleware = require('../middleware/roleMiddleware')
 const router = express.Router()
 
 const PROVIDERS = ['aws', 'azure', 'gcp']
+
+const AWS_DEVELOPMENT_AVAILABILITY_ZONES = {
+  'ap-south-1': [
+    { zoneName: 'ap-south-1a', state: 'sample' },
+    { zoneName: 'ap-south-1b', state: 'sample' },
+    { zoneName: 'ap-south-1c', state: 'sample' }
+  ]
+}
 
 const getProvider = (value) => {
   return value === undefined || value === ''
@@ -173,7 +180,53 @@ router.get(
 )
 
 // =====================================================
-// 3. GET ACTIVE MASTER DATA BY CATEGORY AND PROVIDER
+// 3. GET AWS AVAILABILITY ZONES
+// Development catalogue until AWS credentials exist
+// =====================================================
+
+router.get(
+  '/availability-zones',
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const region = String(req.query.region || '').trim()
+
+      if (!/^[a-z]{2}-[a-z]+-\d$/.test(region)) {
+        return res.status(400).json({
+          message: 'A valid AWS region is required'
+        })
+      }
+
+      const availabilityZones =
+        AWS_DEVELOPMENT_AVAILABILITY_ZONES[region]
+
+      if (!availabilityZones) {
+        return res.status(404).json({
+          message: `No development Availability Zone catalogue is configured for ${region}.`
+        })
+      }
+
+      return res.json({
+        message: 'Development Availability Zone catalogue fetched successfully',
+        cloudProvider: 'aws',
+        region,
+        source: 'development-catalogue',
+        isLive: false,
+        availabilityZones
+      })
+
+    } catch (error) {
+      console.error('Fetch Availability Zones error:', error)
+
+      return res.status(500).json({
+        message: 'Server error'
+      })
+    }
+  }
+)
+
+// =====================================================
+// 4. GET ACTIVE MASTER DATA BY CATEGORY AND PROVIDER
 // =====================================================
 
 router.get(
@@ -225,7 +278,7 @@ router.get(
 )
 
 // =====================================================
-// 4. UPDATE MASTER DATA - ADMIN
+// 5. UPDATE MASTER DATA - ADMIN
 // =====================================================
 
 router.put(
@@ -335,7 +388,7 @@ router.put(
 )
 
 // =====================================================
-// 5. DELETE MASTER DATA - ADMIN
+// 6. DELETE MASTER DATA - ADMIN
 // =====================================================
 
 router.delete(
