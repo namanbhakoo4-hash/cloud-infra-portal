@@ -6,6 +6,8 @@ import { useNavigate } from 'react-router-dom'
 import './UserDashboard.css'
 
 import './ExistingSubnetButtons.css'
+import RouteTableBuilder from '../components/RouteTableBuilder'
+import '../components/RouteTableBuilder.css'
 
 const API = 'http://localhost:5000'
 
@@ -107,7 +109,8 @@ const newVpc = () => ({
 
     existingSubnets: [{ resourceKey: newKey(), subnetId: '', subnetType: 'private' }],
 
-    existingRouteTableId: ''
+    existingRouteTableId: '',
+    routeTables: []
 
   }
 
@@ -475,22 +478,101 @@ const previousCidrs = []
 
     }
 
-    if (hasPublicSubnet && !config.createInternetGateway) {
+    const routeTables = Array.isArray(config.routeTables) ? config.routeTables : []
+    let hasInternetGatewayRoute = Boolean(config.createInternetGateway)
+    let hasNatGatewayRoute = config.natGatewayMode === 'single'
+    const routeTableIds = new Set()
+    const routeIds = new Set()
+    const associatedSubnetKeys = new Set()
+    const subnetByKey = new Map(subnetList.map((subnet) => [subnet.resourceKey, subnet]))
 
-      return `${label}: public subnets require an internet gateway.`
+    if (routeTables.length > 0) {
+      hasInternetGatewayRoute = false
+      hasNatGatewayRoute = false
 
+      for (const [tableIndex, table] of routeTables.entries()) {
+        const tableLabel = `${label}, route table ${tableIndex + 1}`
+        if (!table.id || routeTableIds.has(table.id)) {
+          return `${tableLabel}: missing or duplicate route table identifier.`
+        }
+        routeTableIds.add(table.id)
+
+        const destinations = new Set()
+        const routes = Array.isArray(table.routes) ? table.routes : []
+        for (const [routeIndex, route] of routes.entries()) {
+          const routeLabel = `${tableLabel}, route ${routeIndex + 1}`
+          if (!parseCidr(route.destinationCidr)) {
+            return `${routeLabel}: enter a valid destination IPv4 CIDR.`
+          }
+          if (destinations.has(route.destinationCidr)) {
+            return `${routeLabel}: duplicate destination CIDR in this route table.`
+          }
+          destinations.add(route.destinationCidr)
+
+          if (!route.id || routeIds.has(route.id)) {
+            return `${routeLabel}: missing or duplicate route identifier.`
+          }
+          routeIds.add(route.id)
+
+          const supportedTargets = [
+            'internet_gateway',
+            'nat_gateway',
+            'virtual_private_gateway',
+            'vpc_peering',
+            'transit_gateway',
+            'network_interface'
+          ]
+          if (!supportedTargets.includes(route.targetType)) {
+            return `${routeLabel}: select a supported route target.`
+          }
+
+          const externalTargetPrefixes = {
+            virtual_private_gateway: 'vgw',
+            vpc_peering: 'pcx',
+            transit_gateway: 'tgw',
+            network_interface: 'eni'
+          }
+          const requiredPrefix = externalTargetPrefixes[route.targetType]
+          if (requiredPrefix && !awsId(route.targetId, requiredPrefix)) {
+            return `${routeLabel}: enter a valid ${requiredPrefix.toUpperCase()} target ID.`
+          }
+
+          if (route.targetType === 'internet_gateway') hasInternetGatewayRoute = true
+          if (route.targetType === 'nat_gateway') hasNatGatewayRoute = true
+        }
+
+        for (const subnetKey of table.associatedSubnetKeys || []) {
+          if (!subnetByKey.has(subnetKey)) {
+            return `${tableLabel}: an associated subnet does not belong to this VPC.`
+          }
+          if (associatedSubnetKeys.has(subnetKey)) {
+            return `${tableLabel}: a subnet cannot be associated with multiple route tables.`
+          }
+          associatedSubnetKeys.add(subnetKey)
+        }
+      }
+
+      for (const [subnetIndex, subnet] of subnetList.entries()) {
+        if (subnet.subnetType !== 'public') continue
+        const associatedTable = routeTables.find((table) =>
+          (table.associatedSubnetKeys || []).includes(subnet.resourceKey)
+        )
+        const hasPublicDefaultRoute = (associatedTable?.routes || []).some(
+          (route) =>
+            route.destinationCidr === '0.0.0.0/0' &&
+            route.targetType === 'internet_gateway'
+        )
+        if (!hasPublicDefaultRoute) {
+          return `${label}, subnet ${subnetIndex + 1}: associate this public subnet with a route table containing a 0.0.0.0/0 Internet Gateway route.`
+        }
+      }
     }
 
-    if (
-
-      config.natGatewayMode === 'single' &&
-
-      (!hasPublicSubnet || !config.createInternetGateway)
-
-    ) {
-
-      return `${label}: NAT requires a public subnet and internet gateway.`
-
+    if (hasPublicSubnet && !hasInternetGatewayRoute) {
+      return `${label}: public subnets require an Internet Gateway route.`
+    }
+    if (hasNatGatewayRoute && (!hasPublicSubnet || !hasInternetGatewayRoute)) {
+      return `${label}: NAT requires a public subnet and an Internet Gateway route.`
     }
 
     vpcs.set(resource.resourceKey, resource)
@@ -851,6 +933,21 @@ function UserDashboard() {
 
     })
 
+  }
+
+  function updateRouteTables(routeTables) {
+    const hasInternetGatewayRoute = routeTables.some((table) =>
+      (table.routes || []).some((route) => route.targetType === 'internet_gateway')
+    )
+    const hasNatGatewayRoute = routeTables.some((table) =>
+      (table.routes || []).some((route) => route.targetType === 'nat_gateway')
+    )
+
+    updateVpc({
+      routeTables,
+      createInternetGateway: hasInternetGatewayRoute,
+      natGatewayMode: hasNatGatewayRoute ? 'single' : 'none'
+    })
   }
 
   function updateEc2(changes) {
@@ -1391,6 +1488,12 @@ function UserDashboard() {
               ...defaults.vpcConfiguration,
 
               ...resource.vpcConfiguration,
+
+              routeTables: (resource.vpcConfiguration?.routeTables || []).map((table) => ({
+                ...table,
+                routes: (table.routes || []).map((route) => ({ ...route })),
+                associatedSubnetKeys: [...(table.associatedSubnetKeys || [])]
+              })),
 
               subnets: (resource.vpcConfiguration?.subnets || defaults.vpcConfiguration.subnets).map((subnet) => ({
                 ...subnet,
@@ -2204,11 +2307,20 @@ function UserDashboard() {
 
             >
 
+              <div style={{ gridColumn: '1 / -1' }}>
+                <RouteTableBuilder
+                  routeTables={config.routeTables || []}
+                  subnets={config.subnets || []}
+                  onChange={updateRouteTables}
+                />
+              </div>
+
               <Field label="Internet Gateway">
 
                 <select
 
                   value={String(config.createInternetGateway)}
+                  disabled={(config.routeTables || []).length > 0}
 
                   onChange={(e) =>
 
@@ -2239,6 +2351,7 @@ function UserDashboard() {
                 <select
 
                   value={config.natGatewayMode}
+                  disabled={!config.createInternetGateway || (config.routeTables || []).length > 0}
 
                   onChange={(e) =>
 
