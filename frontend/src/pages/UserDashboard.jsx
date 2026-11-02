@@ -61,7 +61,7 @@ const newSubnet = (type = 'private', ipv4Cidr = '') => ({
 
   ipv4Cidr,
 
-  usableIpCount: usableIpsForCidr(ipv4Cidr),
+  usableIpCount: 0,
 
   subnetType: type,
 
@@ -95,8 +95,8 @@ const newVpc = () => ({
     enableDnsHostnames: true,
 
     subnets: [
-      { ...newSubnet('public', '10.0.1.0/24'), availabilityZone: 'ap-south-1a' },
-      { ...newSubnet('private', '10.0.2.0/24'), availabilityZone: 'ap-south-1b' }
+      { ...newSubnet('public'), availabilityZone: 'ap-south-1a' },
+      { ...newSubnet('private'), availabilityZone: 'ap-south-1b' }
     ],
 
     subnetConfiguration: 'public-private',
@@ -1500,6 +1500,8 @@ function UserDashboard() {
 
     setResources([newBlankResource()])
 
+    setAddedResourceKeys([])
+
     setActiveIndex(0)
 
     setEditingBomId(null)
@@ -1552,7 +1554,7 @@ function UserDashboard() {
 
               subnets: (resource.vpcConfiguration?.subnets || defaults.vpcConfiguration.subnets).map((subnet) => ({
                 ...subnet,
-                usableIpCount: subnet.usableIpCount ?? usableIpsForCidr(subnet.ipv4Cidr)
+                usableIpCount: subnet.usableIpCount ?? 0
               }))
 
             }
@@ -1614,6 +1616,10 @@ function UserDashboard() {
       : [newBlankResource()]
 
     )
+
+    setAddedResourceKeys(savedResources.map((resource) => resource.resourceKey))
+
+    setActiveIndex(-1)
 
     setEditingBomId(bom._id)
 
@@ -2047,10 +2053,7 @@ function UserDashboard() {
 
                         : {
 
-                            ...newSubnet(
-                              subnetType,
-                              allocateSubnetCidr(config.ipv4Cidr, config.subnets, 24)
-                            ),
+                            ...newSubnet(subnetType),
 
                             availabilityZone: availabilityZones[index % (availabilityZones.length || 1)]?.zoneName || ''
 
@@ -2303,7 +2306,7 @@ function UserDashboard() {
                   <Field label="Subnet CIDR Prefix *">
 
                     <select
-                      value={String(subnet.ipv4Cidr || '').split('/')[1] || '24'}
+                      value={String(subnet.ipv4Cidr || '').split('/')[1] || ''}
                       onChange={(e) => {
                         const prefix = Number(e.target.value)
                         const ipv4Cidr = allocateSubnetCidr(
@@ -2316,6 +2319,7 @@ function UserDashboard() {
                       }}
                       required
                     >
+                      <option value="">Select CIDR Prefix</option>
                       {CIDR_PREFIXES
                         .filter((prefix) => prefix >= (parseCidr(config.ipv4Cidr)?.prefix || 16))
                         .map((prefix) => (
@@ -2463,27 +2467,20 @@ function UserDashboard() {
 
         )}
 
-        {config.mode === 'new' && (
-
-          <div style={{ marginTop: 16 }}>
-
-            <button
-
-              type="button"
-
-              className="user-primary-btn"
-
-              onClick={() => setAddedResourceKeys((previous) => previous.includes(active.resourceKey) ? previous : [...previous, active.resourceKey])}
-
-            >
-
-              {addedResourceKeys.includes(active.resourceKey) ? 'VPC Added to Resources' : 'Add VPC to Resources'}
-
-            </button>
-
-          </div>
-
-        )}
+        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="user-primary-btn"
+            onClick={() => {
+              setAddedResourceKeys((previous) =>
+                previous.includes(active.resourceKey) ? previous : [...previous, active.resourceKey]
+              )
+              setActiveIndex(-1)
+            }}
+          >
+            Save & Collapse Resource
+          </button>
+        </div>
 
       </>
 
@@ -3535,21 +3532,20 @@ function UserDashboard() {
 
         </div>
 
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
           <button
             type="button"
             className="user-primary-btn"
-            onClick={() =>
+            onClick={() => {
               setAddedResourceKeys((previous) =>
                 previous.includes(active.resourceKey)
                   ? previous
                   : [...previous, active.resourceKey]
               )
-            }
+              setActiveIndex(-1)
+            }}
           >
-            {addedResourceKeys.includes(active.resourceKey)
-              ? 'EC2 Added to Resources'
-              : 'Add EC2 to Resources'}
+            Save & Collapse Resource
           </button>
         </div>
 
@@ -4035,132 +4031,129 @@ function UserDashboard() {
 
               </div>
 
-              <div
+              <div className="resource-configuration-list" style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+                {resources.map((item, index) => {
+                  const isExpanded = activeIndex === index
+                  const isAdded = addedResourceKeys.includes(item.resourceKey)
+                  const vpcConfig = item.vpcConfiguration || {}
+                  const ec2Config = item.ec2Configuration || {}
+                  const resourceTitle = item.service === 'VPC'
+                    ? 'Amazon VPC'
+                    : item.service === 'EC2'
+                      ? 'Amazon EC2'
+                      : 'New resource'
+                  const resourceName = item.service === 'VPC'
+                    ? (vpcConfig.mode === 'existing'
+                      ? (vpcConfig.existingVpcId || 'Existing VPC')
+                      : (vpcConfig.name || 'Unnamed VPC'))
+                    : item.service === 'EC2'
+                      ? (item.resourceName || 'EC2 resource')
+                      : 'Choose a cloud service'
+                  const resourceDetails = item.service === 'VPC'
+                    ? [
+                        vpcConfig.mode === 'existing'
+                          ? 'Existing VPC'
+                          : (vpcConfig.ipv4Cidr || 'CIDR not configured'),
+                        `${vpcConfig.mode === 'existing'
+                          ? (vpcConfig.existingSubnets || []).length
+                          : (vpcConfig.subnets || []).length} subnet(s)`
+                      ]
+                    : item.service === 'EC2'
+                      ? [
+                          item.instanceType || 'Instance type not selected',
+                          `${item.quantity || 1} instance(s) · ${item.storage || 20} GiB`
+                        ]
+                      : ['Configuration not started']
 
-                style={{
-
-                  display: 'flex',
-
-                  flexWrap: 'wrap',
-
-                  gap: 10,
-
-                  marginBottom: 20
-
-                }}
-
-              >
-
-                {resources.map((item, index) => (
-
-                  <button
-
-                    key={item.resourceKey}
-
-                    type="button"
-
-                    className={
-
-                      activeIndex === index
-
-                        ? 'user-primary-btn'
-
-                        : 'user-secondary-btn'
-
-                    }
-
-                    onClick={() => setActiveIndex(index)}
-
-                  >
-
-                    Resource {index + 1}
-
-                    {item.service ? ` (${item.service})` : ''}
-
-                  </button>
-
-                ))}
-
-              </div>
-
-              <div
-
-                style={{
-
-                  padding: 20,
-
-                  border: '1px solid #e2e8f0',
-
-                  borderRadius: 12,
-
-                  background: '#f8fafc',
-
-                  marginBottom: 20
-
-                }}
-
-              >
-
-                <h3>Resource {activeIndex + 1}</h3>
-
-                <div className="user-form-grid">
-
-                  <Field label="Cloud Service *">
-
-                    <select
-
-                      value={active.service}
-
-                      onChange={(e) =>
-
-                        selectService(e.target.value)
-
-                      }
-
+                  return (
+                    <div
+                      key={item.resourceKey}
+                      className={`resource-configuration-card${isExpanded ? ' is-expanded' : ''}`}
+                      style={{
+                        border: isExpanded ? '1px solid #2563eb' : '1px solid #dbe3ef',
+                        borderRadius: 12,
+                        background: '#fff',
+                        overflow: 'hidden',
+                        boxShadow: isExpanded ? '0 4px 14px rgba(37, 99, 235, 0.08)' : '0 1px 3px rgba(15, 23, 42, 0.04)'
+                      }}
                     >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '16px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                          <div style={{
+                            width: 38,
+                            height: 38,
+                            flex: '0 0 38px',
+                            display: 'grid',
+                            placeItems: 'center',
+                            borderRadius: 10,
+                            background: item.service === 'VPC' ? '#eff6ff' : item.service === 'EC2' ? '#f0fdf4' : '#f1f5f9',
+                            color: item.service === 'VPC' ? '#1d4ed8' : item.service === 'EC2' ? '#15803d' : '#64748b',
+                            fontWeight: 700
+                          }}>
+                            {item.service === 'VPC' ? 'V' : item.service === 'EC2' ? 'E' : index + 1}
+                          </div>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                              <strong style={{ color: '#0f172a', fontSize: 14 }}>Resource {index + 1}</strong>
+                              <span style={{ color: '#64748b', fontSize: 12 }}>{resourceTitle}</span>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                borderRadius: 999,
+                                padding: '3px 8px',
+                                fontSize: 11,
+                                fontWeight: 600,
+                                color: isAdded ? '#166534' : '#92400e',
+                                background: isAdded ? '#f0fdf4' : '#fffbeb'
+                              }}>
+                                {isAdded ? 'Added' : 'Draft'}
+                              </span>
+                            </div>
+                            <div style={{ color: '#334155', fontSize: 13, marginTop: 4, overflowWrap: 'anywhere' }}>{resourceName}</div>
+                            {!isExpanded && (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', color: '#64748b', fontSize: 12, marginTop: 4 }}>
+                                {resourceDetails.map((detail, detailIndex) => <span key={detailIndex}>{detail}</span>)}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="user-secondary-btn"
+                          style={{ flex: '0 0 auto', whiteSpace: 'nowrap' }}
+                          onClick={() => setActiveIndex(isExpanded ? -1 : index)}
+                        >
+                          {isExpanded ? 'Collapse' : isAdded ? 'Edit' : 'Configure'}
+                        </button>
+                      </div>
 
-                      <option value="">
-
-                        Select Cloud Service
-
-                      </option>
-
-                      <option value="VPC" disabled={cloudProvider !== 'aws'}>
-
-                        Amazon VPC
-
-                      </option>
-
-                      <option value="EC2" disabled={cloudProvider !== 'aws'}>
-
-                        Amazon EC2
-
-                      </option>
-
-                      <option disabled>Amazon EBS (Coming Soon)</option>
-
-                      <option disabled>Amazon S3 (Coming Soon)</option>
-
-                      <option disabled>Amazon RDS (Coming Soon)</option>
-
-                    </select>
-
-                  </Field>
-
-                </div>
-
-                {isVpc && renderVpcForm()}
-
-                {isEc2 && renderEc2Form()}
-
-                {!active.service && (
-
-                  <p>Select a service to configure this resource.</p>
-
-                )}
-
+                      {isExpanded && (
+                        <div style={{ borderTop: '1px solid #e2e8f0', padding: 20, background: '#f8fafc' }}>
+                          <h3 style={{ marginTop: 0, marginBottom: 16, color: '#0f172a' }}>Configure Resource {index + 1}</h3>
+                          <div className="user-form-grid">
+                            <Field label="Cloud Service *">
+                              <select
+                                value={item.service}
+                                onChange={(e) => selectService(e.target.value)}
+                              >
+                                <option value="">Select Cloud Service</option>
+                                <option value="VPC" disabled={cloudProvider !== 'aws'}>Amazon VPC</option>
+                                <option value="EC2" disabled={cloudProvider !== 'aws'}>Amazon EC2</option>
+                                <option disabled>Amazon EBS (Coming Soon)</option>
+                                <option disabled>Amazon S3 (Coming Soon)</option>
+                                <option disabled>Amazon RDS (Coming Soon)</option>
+                              </select>
+                            </Field>
+                          </div>
+                          {isVpc && renderVpcForm()}
+                          {isEc2 && renderEc2Form()}
+                          {!item.service && <p style={{ color: '#64748b', marginBottom: 0 }}>Select a service to configure this resource.</p>}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
-
               <div
 
                 style={{
@@ -4232,34 +4225,6 @@ function UserDashboard() {
                   </button>
 
                 )}
-
-              </div>
-
-              <div className="user-panel" style={{ padding: 18 }}>
-
-                <h3>Resources Added ({resources.filter((item) => addedResourceKeys.includes(item.resourceKey)).length})</h3>
-
-                {resources.filter((item) => addedResourceKeys.includes(item.resourceKey)).map((item, index) => (
-
-                  <div key={item.resourceKey} style={{ marginBottom: 12 }}>
-
-                    <p>{index + 1}. {item.service || 'Not selected'} — {item.service === 'VPC' ? (item.vpcConfiguration?.name || item.vpcConfiguration?.existingVpcId || 'Unnamed VPC') : (item.resourceName || 'Unnamed resource')}</p>
-
-                    {item.service === 'VPC' && item.vpcConfiguration?.mode === 'new' && item.vpcConfiguration.subnets.map((subnet, subnetIndex) => (
-
-                      <p key={subnet.resourceKey} style={{ margin: '6px 0 6px 24px' }}>
-
-                        {index + 1}.{subnetIndex + 1}. Subnet — {subnet.name || `Subnet ${subnetIndex + 1}`} ({subnet.subnetType === 'public' ? 'Public' : 'Private'}) · {subnet.availabilityZone || 'AZ not set'} · {subnet.ipv4Cidr || 'CIDR not set'}
-
-                      </p>
-
-                    ))}
-
-                  </div>
-
-                ))}
-
-                {addedResourceKeys.length === 0 && <p>No resources added yet. Configure a VPC or EC2 resource, then add it to Resources.</p>}
 
               </div>
 
