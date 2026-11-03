@@ -47,14 +47,20 @@ function getConfiguredAvailabilityZones(region) {
 // RESOURCE NORMALIZATION AND SUBNET GENERATION
 // =====================================================
 
-function normalizeResources(resources, region) {
+function normalizeResources(resources, fallbackRegion) {
   if (!Array.isArray(resources) || resources.length === 0) {
     throw new Error('Add at least one resource to the BOM.')
   }
 
   const resourceKeys = new Set()
-  const availabilityZones =
-    getConfiguredAvailabilityZones(region)
+  const vpcRegions = new Map()
+
+  resources.forEach((resource, index) => {
+    if (String(resource?.service || '').trim().toUpperCase() === 'VPC') {
+      const resourceRegion = String(resource.region || fallbackRegion || '').trim()
+      if (resourceRegion) vpcRegions.set(String(resource.resourceKey || `resource_${index + 1}`).trim(), resourceRegion)
+    }
+  })
 
   return resources.map((resource, index) => {
     if (!resource || typeof resource !== 'object') {
@@ -86,6 +92,11 @@ function normalizeResources(resources, region) {
 
     resourceKeys.add(resourceKey)
 
+    const resourceRegion = String(resource.region || fallbackRegion || '').trim()
+    if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/.test(resourceRegion)) {
+      throw new Error(`Select a valid AWS Region for resource ${index + 1}.`)
+    }
+
     if (service === 'EC2') {
       const config = resource.ec2Configuration
 
@@ -107,12 +118,24 @@ function normalizeResources(resources, region) {
         )
       }
 
+      const network = config.network || {}
+      if (network.vpcSource === 'bom') {
+        const linkedVpcRegion = vpcRegions.get(String(network.vpcResourceKey || ''))
+        if (!linkedVpcRegion) {
+          throw new Error(`EC2 resource ${index + 1} references a VPC that is missing from the BOM.`)
+        }
+        if (linkedVpcRegion !== resourceRegion) {
+          throw new Error(`EC2 resource ${index + 1} must use the same AWS Region (${linkedVpcRegion}) as its selected BOM VPC.`)
+        }
+      }
+
       // AMI is intentionally optional. The Terraform service
       // will resolve it from the selected OS and region later.
       return {
         ...resource,
         resourceKey,
         service,
+        region: resourceRegion,
         ec2Configuration: {
           ...config,
           quantity,
@@ -179,6 +202,7 @@ function normalizeResources(resources, region) {
         ...resource,
         resourceKey,
         service,
+        region: resourceRegion,
         vpcConfiguration: {
           ...config,
           mode: 'existing',
@@ -238,14 +262,35 @@ function normalizeResources(resources, region) {
       )
     }
 
-    const subnets = allocateSubnets({
+    const submittedSubnetConfigurations = Array.isArray(config.subnets)
+      ? config.subnets
+      : []
+    const submittedAvailabilityZones = submittedSubnetConfigurations
+      .map((subnet) => String(subnet.availabilityZone || '').trim())
+      .filter(Boolean)
+    const availabilityZones = submittedAvailabilityZones.length
+      ? [...new Set(submittedAvailabilityZones)]
+      : getConfiguredAvailabilityZones(resourceRegion)
+
+    const allocatedSubnets = allocateSubnets({
       vpcCidr: ipv4Cidr,
       publicFirstCidr,
       publicQuantity,
       privateFirstCidr,
       privateQuantity,
-      region,
+      region: resourceRegion,
       availabilityZones
+    })
+
+    const subnets = allocatedSubnets.map((subnet, subnetIndex) => {
+      const selectedZone = String(submittedSubnetConfigurations[subnetIndex]?.availabilityZone || subnet.availabilityZone).trim()
+      if (!new RegExp(`^${resourceRegion}[a-z]$`).test(selectedZone)) {
+        throw new Error(`Subnet ${subnetIndex + 1} must use an Availability Zone in ${resourceRegion}.`)
+      }
+      return {
+        ...subnet,
+        availabilityZone: selectedZone
+      }
     })
 
     const natGatewayMode = config.natGatewayMode || 'none'
@@ -260,6 +305,7 @@ function normalizeResources(resources, region) {
       ...resource,
       resourceKey,
       service,
+      region: resourceRegion,
       vpcConfiguration: {
         ...config,
         mode: 'new',
@@ -292,6 +338,8 @@ function validateBomInput(body) {
     justification
   } = body
 
+  const fallbackRegion = String(region || '').trim()
+
   if (
     typeof projectName !== 'string' ||
     !projectName.trim() ||
@@ -302,23 +350,29 @@ function validateBomInput(body) {
       'Staging',
       'Production'
     ].includes(environment) ||
-    typeof region !== 'string' ||
-    !region.trim() ||
     !Array.isArray(resources) ||
     resources.length === 0 ||
     typeof justification !== 'string' ||
     !justification.trim()
   ) {
     throw new Error(
-      'Please provide a project name, valid environment, AWS region, at least one resource, and business justification.'
+      'Please provide a project name, valid environment, at least one resource, and business justification.'
     )
+  }
+
+  const normalizedResources = normalizeResources(resources, fallbackRegion)
+  const legacyRegion = fallbackRegion ||
+    normalizedResources.find((resource) => resource.region)?.region
+
+  if (!legacyRegion) {
+    throw new Error('Select an AWS Region for each VPC and EC2 resource.')
   }
 
   return {
     projectName: projectName.trim(),
     environment,
-    region: region.trim(),
-    resources: normalizeResources(resources, region.trim()),
+    region: legacyRegion,
+    resources: normalizedResources,
     justification: justification.trim()
   }
 }

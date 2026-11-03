@@ -8,13 +8,9 @@ const net = require('net')
 
 const { execFileSync } = require('child_process')
 
-
-
 const terraformRoot = path.resolve(__dirname, '../../terraform')
 
 const generatedRoot = path.join(terraformRoot, 'generated')
-
-
 
 const providerCache = path.join(
 
@@ -26,15 +22,11 @@ const providerCache = path.join(
 
 )
 
-
-
 const hcl = value => JSON.stringify(String(value))
 
 const tfBool = value => value ? 'true' : 'false'
 
 const tfList = items => `[${items.map(hcl).join(', ')}]`
-
-
 
 function required(value, label) {
 
@@ -48,8 +40,6 @@ function required(value, label) {
 
 }
 
-
-
 function terraformName(value) {
 
   const result = String(value || 'resource')
@@ -62,8 +52,6 @@ function terraformName(value) {
 
 }
 
-
-
 function parseCidr(value) {
 
   const match = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/.exec(
@@ -72,19 +60,13 @@ function parseCidr(value) {
 
   )
 
-
-
   if (!match || net.isIP(match[1]) !== 4) {
 
     throw new Error(`Invalid IPv4 CIDR: ${value}`)
 
   }
 
-
-
   const octets = match[1].split('.').map(Number)
-
-
 
   if (octets.some(octet => octet < 0 || octet > 255)) {
 
@@ -92,19 +74,13 @@ function parseCidr(value) {
 
   }
 
-
-
   const prefix = Number(match[2])
-
-
 
   if (prefix < 0 || prefix > 32) {
 
     throw new Error(`Invalid CIDR prefix: ${value}`)
 
   }
-
-
 
   const address = octets.reduce(
 
@@ -114,21 +90,15 @@ function parseCidr(value) {
 
   )
 
-
-
   const mask = prefix === 0
 
     ? 0
 
     : (0xffffffff << (32 - prefix)) >>> 0
 
-
-
   const start = (address & mask) >>> 0
 
   const end = (start | (~mask >>> 0)) >>> 0
-
-
 
   if (address !== start) {
 
@@ -136,19 +106,13 @@ function parseCidr(value) {
 
   }
 
-
-
   return { start, end, prefix }
 
 }
 
-
-
 function validateAwsCidr(value, label) {
 
   const cidr = parseCidr(value)
-
-
 
   if (cidr.prefix < 16 || cidr.prefix > 28) {
 
@@ -156,13 +120,9 @@ function validateAwsCidr(value, label) {
 
   }
 
-
-
   return cidr
 
 }
-
-
 
 function containsCidr(parent, child) {
 
@@ -174,8 +134,6 @@ function containsCidr(parent, child) {
 
 }
 
-
-
 function overlapsCidr(first, second) {
 
   const a = parseCidr(first)
@@ -186,8 +144,6 @@ function overlapsCidr(first, second) {
 
 }
 
-
-
 function validateId(value, prefix, label) {
 
   const pattern = new RegExp(
@@ -196,21 +152,15 @@ function validateId(value, prefix, label) {
 
   )
 
-
-
   if (!pattern.test(String(value || ''))) {
 
     throw new Error(`Invalid ${label}`)
 
   }
 
-
-
   return value
 
 }
-
-
 
 function normalizeResourceKey(resource, index) {
 
@@ -218,13 +168,9 @@ function normalizeResourceKey(resource, index) {
 
 }
 
-
-
 function getAmiConfiguration(operatingSystem, operatingSystemType) {
 
   const family = String(operatingSystem || 'Linux').trim().toLowerCase()
-
-
 
   const selectedType = String(
 
@@ -232,11 +178,7 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
 
   ).trim()
 
-
-
   const type = selectedType.toLowerCase()
-
-
 
   if (family === 'windows') {
 
@@ -250,11 +192,7 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
 
     }
 
-
-
     const windowsVersion = /^windows server (2019|2022|2025)$/.exec(type)
-
-
 
     if (!windowsVersion) {
 
@@ -262,11 +200,7 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
 
     }
 
-
-
     const version = windowsVersion[1]
-
-
 
     return {
 
@@ -282,15 +216,11 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
 
   }
 
-
-
   if (family !== 'linux') {
 
     throw new Error(`Unsupported operating system "${operatingSystem}".`)
 
   }
-
-
 
   if (type === 'amazon linux 2023' || type === 'amazon linux' || type === 'al2023') {
 
@@ -308,8 +238,6 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
 
   }
 
-
-
   if (type === 'amazon linux 2' || type === 'al2') {
 
     return {
@@ -325,8 +253,6 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
     }
 
   }
-
-
 
   if (type === 'ubuntu 22.04 lts' || type === 'ubuntu' || type === 'ubuntu 22.04') {
 
@@ -344,8 +270,6 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
 
   }
 
-
-
   if (type === 'ubuntu 24.04 lts' || type === 'ubuntu 24.04') {
 
     return {
@@ -361,8 +285,6 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
     }
 
   }
-
-
 
   if (type === 'kali linux' || type === 'kali') {
 
@@ -380,8 +302,6 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
 
   }
 
-
-
   throw new Error(
 
     `Unsupported Linux type "${selectedType}". Supported options: Ubuntu 22.04 LTS, Ubuntu 24.04 LTS, Kali Linux, Amazon Linux 2023, Amazon Linux 2.`
@@ -389,8 +309,6 @@ function getAmiConfiguration(operatingSystem, operatingSystemType) {
   )
 
 }
-
-
 
 function createTerraformFiles(bom) {
 
@@ -400,19 +318,13 @@ function createTerraformFiles(bom) {
 
   }
 
-
-
   if (!/^[a-zA-Z0-9_-]+$/.test(bom.ticketId)) {
 
     throw new Error('Invalid BOM ticket ID')
 
   }
 
-
-
   const region = required(bom.region, 'AWS region')
-
-
 
   if (!/^([a-z]{2}(?:-gov)?-[a-z]+-\d+)$/.test(region)) {
 
@@ -420,19 +332,21 @@ function createTerraformFiles(bom) {
 
   }
 
-
-
   const resources = bom.resources || []
 
-
-
   if (!Array.isArray(resources) || resources.length === 0) {
-
     throw new Error('BOM must contain at least one resource')
-
   }
 
-
+  const providerAlias = value => `aws_${String(value).replace(/[^a-zA-Z0-9]/g, '_')}`
+  const resourceRegions = resources.map(resource => {
+    const selectedRegion = String(resource.region || region).trim()
+    if (!/^([a-z]{2}(?:-gov)?-[a-z]+-\d+)$/.test(selectedRegion)) {
+      throw new Error(`Invalid AWS region for resource ${resource.resourceKey || resource.service}`)
+    }
+    return selectedRegion
+  })
+  const uniqueRegions = [...new Set(resourceRegions)]
 
   const terraformFolder = path.join(generatedRoot, bom.ticketId)
 
@@ -450,8 +364,6 @@ function createTerraformFiles(bom) {
 
   const amiConfigurations = new Map()
 
-
-
   function addPlanned(type, name, details = {}) {
 
     plannedResources.push({
@@ -468,13 +380,9 @@ function createTerraformFiles(bom) {
 
   }
 
-
-
   resources.forEach((resource, index) => {
 
     const key = normalizeResourceKey(resource, index)
-
-
 
     if (seenKeys.has(key)) {
 
@@ -482,27 +390,19 @@ function createTerraformFiles(bom) {
 
     }
 
-
-
     seenKeys.add(key)
 
   })
-
-
 
   resources.forEach((resource, index) => {
 
     const service = String(resource.service || '').toUpperCase()
 
-
-
     if (service !== 'VPC') return
 
-
-
+    const resourceRegion = String(resource.region || region).trim()
+    const provider = providerAlias(resourceRegion)
     const config = resource.vpcConfiguration
-
-
 
     if (!config) {
 
@@ -510,82 +410,106 @@ function createTerraformFiles(bom) {
 
     }
 
-
-
     const key = normalizeResourceKey(resource, index)
 
     const label = `vpc_${index + 1}`
 
-
-
     if ((config.mode || 'new') === 'existing') {
+
       const existingVpcId = validateId(
+
         required(config.existingVpcId, 'Existing VPC ID'),
+
         'vpc',
+
         'existing VPC ID'
+
       )
 
       vpcReferences.set(key, hcl(existingVpcId))
 
       const existingSubnets = config.existingSubnets || []
+
       if (!Array.isArray(existingSubnets) || existingSubnets.length === 0) {
+
         throw new Error(`Existing VPC ${existingVpcId} must include at least one subnet reference`)
+
       }
 
       existingSubnets.forEach((subnet, subnetIndex) => {
+
         const subnetKey = required(
+
           String(subnet.resourceKey || ''),
+
           `Existing subnet ${subnetIndex + 1} resource key`
+
         )
+
         if (subnetReferences.has(subnetKey)) {
+
           throw new Error(`Duplicate subnet key: ${subnetKey}`)
+
         }
 
         const subnetId = validateId(
+
           required(subnet.subnetId, `Existing subnet ${subnetIndex + 1} ID`),
+
           'subnet',
+
           'existing subnet ID'
+
         )
+
         const subnetType = String(subnet.subnetType || 'private').toLowerCase()
+
         if (!['public', 'private'].includes(subnetType)) {
+
           throw new Error(`Invalid subnet type: ${subnetType}`)
+
         }
 
         subnetReferences.set(subnetKey, {
+
           subnetRef: hcl(subnetId),
+
           vpcKey: key,
+
           subnetType
+
         })
+
       })
 
       if (config.existingRouteTableId) {
+
         validateId(config.existingRouteTableId, 'rtb', 'existing route table ID')
+
       }
 
       return
+
     }
 
     if ((config.mode || 'new') !== 'new') {
+
       throw new Error(`Unsupported VPC mode: ${config.mode}`)
+
     }
 
     const cidr = required(config.ipv4Cidr, 'VPC IPv4 CIDR')
 
     validateAwsCidr(cidr, 'VPC')
 
-
-
     const vpcName = resource.resourceName || `vpc-${index + 1}`
-
-
 
     blocks.push(`
 
 resource "aws_vpc" "${label}" {
+  provider = aws.${provider}
 
   cidr_block = ${hcl(cidr)}
-
-
 
   tags = {
 
@@ -597,21 +521,13 @@ resource "aws_vpc" "${label}" {
 
 `)
 
-
-
     addPlanned('aws_vpc', label, { cidr })
-
-
 
     const vpcRef = `aws_vpc.${label}.id`
 
     vpcReferences.set(key, vpcRef)
 
-
-
     const subnets = config.subnets || []
-
-
 
     if (!Array.isArray(subnets)) {
 
@@ -619,15 +535,11 @@ resource "aws_vpc" "${label}" {
 
     }
 
-
-
     const publicSubnets = []
 
     const privateSubnets = []
 
     const usedSubnetCidrs = []
-
-
 
     subnets.forEach((subnet, subnetIndex) => {
 
@@ -637,15 +549,11 @@ resource "aws_vpc" "${label}" {
 
       )
 
-
-
       if (subnetReferences.has(subnetKey)) {
 
         throw new Error(`Duplicate subnet key: ${subnetKey}`)
 
       }
-
-
 
       const subnetCidr = required(
 
@@ -655,11 +563,7 @@ resource "aws_vpc" "${label}" {
 
       )
 
-
-
       validateAwsCidr(subnetCidr, 'Subnet')
-
-
 
       if (!containsCidr(cidr, subnetCidr)) {
 
@@ -670,8 +574,6 @@ resource "aws_vpc" "${label}" {
         )
 
       }
-
-
 
       for (const previous of usedSubnetCidrs) {
 
@@ -687,15 +589,9 @@ resource "aws_vpc" "${label}" {
 
       }
 
-
-
       usedSubnetCidrs.push(subnetCidr)
 
-
-
       const subnetType = String(subnet.subnetType || 'private').toLowerCase()
-
-
 
       if (!['public', 'private'].includes(subnetType)) {
 
@@ -703,11 +599,7 @@ resource "aws_vpc" "${label}" {
 
       }
 
-
-
       const subnetLabel = `${label}_subnet_${subnetIndex + 1}`
-
-
 
       const availabilityZone = required(
 
@@ -717,23 +609,20 @@ resource "aws_vpc" "${label}" {
 
       )
 
-
-
-      if (!new RegExp(`^${region}[a-z]$`).test(availabilityZone)) {
+      if (!new RegExp(`^${resourceRegion}[a-z]$`).test(availabilityZone)) {
 
         throw new Error(
 
-          `Availability zone ${availabilityZone} does not match ${region}`
+          `Availability zone ${availabilityZone} does not match ${resourceRegion}`
 
         )
 
       }
 
-
-
       blocks.push(`
 
 resource "aws_subnet" "${subnetLabel}" {
+  provider = aws.${provider}
 
   vpc_id                  = ${vpcRef}
 
@@ -747,8 +636,6 @@ resource "aws_subnet" "${subnetLabel}" {
 
   )}
 
-
-
   tags = {
 
     Name = ${hcl(`${vpcName}-${subnetType}-${subnetIndex + 1}`)}
@@ -758,8 +645,6 @@ resource "aws_subnet" "${subnetLabel}" {
 }
 
 `)
-
-
 
       addPlanned('aws_subnet', subnetLabel, {
 
@@ -771,11 +656,7 @@ resource "aws_subnet" "${subnetLabel}" {
 
       })
 
-
-
       const subnetRef = `aws_subnet.${subnetLabel}.id`
-
-
 
       subnetReferences.set(subnetKey, {
 
@@ -787,11 +668,7 @@ resource "aws_subnet" "${subnetLabel}" {
 
       })
 
-
-
       const item = { label: subnetLabel, ref: subnetRef }
-
-
 
       if (subnetType === 'public') {
 
@@ -805,13 +682,9 @@ resource "aws_subnet" "${subnetLabel}" {
 
     })
 
-
-
     const createIgw = config.createInternetGateway === true
 
     const natMode = config.natGatewayMode || 'none'
-
-
 
     if (!['none', 'single', 'per-az'].includes(natMode)) {
 
@@ -819,15 +692,11 @@ resource "aws_subnet" "${subnetLabel}" {
 
     }
 
-
-
     if (natMode !== 'none' && privateSubnets.length === 0) {
 
       throw new Error('A NAT Gateway requires at least one private subnet')
 
     }
-
-
 
     if (natMode !== 'none' && publicSubnets.length === 0) {
 
@@ -840,8 +709,6 @@ resource "aws_subnet" "${subnetLabel}" {
       )
 
     }
-
-
 
     if (natMode !== 'none' && !createIgw) {
 
@@ -857,8 +724,6 @@ resource "aws_subnet" "${subnetLabel}" {
 
     }
 
-
-
     if (publicSubnets.length > 0 && !createIgw) {
 
       warnings.push(
@@ -871,23 +736,18 @@ resource "aws_subnet" "${subnetLabel}" {
 
     }
 
-
-
     if (createIgw) {
 
       const igwLabel = `${label}_igw`
 
       const publicRouteLabel = `${label}_public_routes`
 
-
-
       blocks.push(`
 
 resource "aws_internet_gateway" "${igwLabel}" {
+  provider = aws.${provider}
 
   vpc_id = ${vpcRef}
-
-
 
   tags = {
 
@@ -897,13 +757,10 @@ resource "aws_internet_gateway" "${igwLabel}" {
 
 }
 
-
-
 resource "aws_route_table" "${publicRouteLabel}" {
+  provider = aws.${provider}
 
   vpc_id = ${vpcRef}
-
-
 
   route {
 
@@ -912,8 +769,6 @@ resource "aws_route_table" "${publicRouteLabel}" {
     gateway_id = aws_internet_gateway.${igwLabel}.id
 
   }
-
-
 
   tags = {
 
@@ -925,23 +780,18 @@ resource "aws_route_table" "${publicRouteLabel}" {
 
 `)
 
-
-
       addPlanned('aws_internet_gateway', igwLabel)
 
       addPlanned('aws_route_table', publicRouteLabel)
-
-
 
       publicSubnets.forEach((subnet, subnetIndex) => {
 
         const associationLabel = `${label}_public_assoc_${subnetIndex + 1}`
 
-
-
         blocks.push(`
 
 resource "aws_route_table_association" "${associationLabel}" {
+  provider = aws.${provider}
 
   subnet_id      = ${subnet.ref}
 
@@ -951,15 +801,11 @@ resource "aws_route_table_association" "${associationLabel}" {
 
 `)
 
-
-
         addPlanned('aws_route_table_association', associationLabel)
 
       })
 
     }
-
-
 
     if (natMode !== 'none') {
 
@@ -969,8 +815,6 @@ resource "aws_route_table_association" "${associationLabel}" {
 
         : [publicSubnets[0]]
 
-
-
       natSubnets.forEach((publicSubnet, natIndex) => {
 
         const suffix = natIndex + 1
@@ -979,15 +823,12 @@ resource "aws_route_table_association" "${associationLabel}" {
 
         const natLabel = `${label}_nat_${suffix}`
 
-
-
         blocks.push(`
 
 resource "aws_eip" "${eipLabel}" {
+  provider = aws.${provider}
 
   domain = "vpc"
-
-
 
   tags = {
 
@@ -997,19 +838,14 @@ resource "aws_eip" "${eipLabel}" {
 
 }
 
-
-
 resource "aws_nat_gateway" "${natLabel}" {
+  provider = aws.${provider}
 
   allocation_id = aws_eip.${eipLabel}.id
 
   subnet_id     = ${publicSubnet.ref}
 
-
-
   depends_on = [aws_internet_gateway.${label}_igw]
-
-
 
   tags = {
 
@@ -1021,11 +857,7 @@ resource "aws_nat_gateway" "${natLabel}" {
 
 `)
 
-
-
         addPlanned('aws_eip', eipLabel)
-
-
 
         addPlanned('aws_nat_gateway', natLabel, {
 
@@ -1035,19 +867,14 @@ resource "aws_nat_gateway" "${natLabel}" {
 
       })
 
-
-
       const privateRouteLabel = `${label}_private_routes`
-
-
 
       blocks.push(`
 
 resource "aws_route_table" "${privateRouteLabel}" {
+  provider = aws.${provider}
 
   vpc_id = ${vpcRef}
-
-
 
   route {
 
@@ -1056,8 +883,6 @@ resource "aws_route_table" "${privateRouteLabel}" {
     nat_gateway_id = aws_nat_gateway.${label}_nat_1.id
 
   }
-
-
 
   tags = {
 
@@ -1069,21 +894,16 @@ resource "aws_route_table" "${privateRouteLabel}" {
 
 `)
 
-
-
       addPlanned('aws_route_table', privateRouteLabel)
-
-
 
       privateSubnets.forEach((subnet, subnetIndex) => {
 
         const associationLabel = `${label}_private_assoc_${subnetIndex + 1}`
 
-
-
         blocks.push(`
 
 resource "aws_route_table_association" "${associationLabel}" {
+  provider = aws.${provider}
 
   subnet_id      = ${subnet.ref}
 
@@ -1093,8 +913,6 @@ resource "aws_route_table_association" "${associationLabel}" {
 
 `)
 
-
-
         addPlanned('aws_route_table_association', associationLabel)
 
       })
@@ -1103,17 +921,11 @@ resource "aws_route_table_association" "${associationLabel}" {
 
   })
 
-
-
   resources.forEach((resource, index) => {
 
     const service = String(resource.service || '').toUpperCase()
 
-
-
     if (service === 'VPC') return
-
-
 
     if (service !== 'EC2') {
 
@@ -1121,11 +933,10 @@ resource "aws_route_table_association" "${associationLabel}" {
 
     }
 
-
+    const resourceRegion = String(resource.region || region).trim()
+    const provider = providerAlias(resourceRegion)
 
     const config = resource.ec2Configuration
-
-
 
     if (!config) {
 
@@ -1133,19 +944,13 @@ resource "aws_route_table_association" "${associationLabel}" {
 
     }
 
-
-
     const network = config.network || {}
 
     const source = network.vpcSource || 'bom'
 
-
-
     let subnetRef
 
     let vpcRef
-
-
 
     if (source === 'bom') {
 
@@ -1157,8 +962,6 @@ resource "aws_route_table_association" "${associationLabel}" {
 
       )
 
-
-
       const subnetKey = required(
 
         network.subnetResourceKey,
@@ -1167,19 +970,13 @@ resource "aws_route_table_association" "${associationLabel}" {
 
       )
 
-
-
       if (!vpcReferences.has(vpcKey)) {
 
         throw new Error(`VPC not found in BOM: ${vpcKey}`)
 
       }
 
-
-
       const subnet = subnetReferences.get(subnetKey)
-
-
 
       if (!subnet) {
 
@@ -1187,15 +984,19 @@ resource "aws_route_table_association" "${associationLabel}" {
 
       }
 
-
-
       if (subnet.vpcKey !== vpcKey) {
 
         throw new Error(`Subnet ${subnetKey} does not belong to VPC ${vpcKey}`)
 
       }
 
-
+      const linkedVpc = resources.find((candidate, candidateIndex) =>
+        normalizeResourceKey(candidate, candidateIndex) === vpcKey
+      )
+      const linkedVpcRegion = String(linkedVpc?.region || region).trim()
+      if (linkedVpcRegion !== resourceRegion) {
+        throw new Error(`EC2 resource ${key} must use the same AWS Region (${linkedVpcRegion}) as its selected BOM VPC`)
+      }
 
       subnetRef = subnet.subnetRef
 
@@ -1206,8 +1007,6 @@ resource "aws_route_table_association" "${associationLabel}" {
       validateId(network.vpcId, 'vpc', 'existing VPC ID')
 
       vpcRef = hcl(network.vpcId)
-
-
 
       subnetRef = hcl(
 
@@ -1221,8 +1020,6 @@ resource "aws_route_table_association" "${associationLabel}" {
 
     }
 
-
-
     const instanceType = required(
 
       config.instanceType || resource.instanceType,
@@ -1231,11 +1028,7 @@ resource "aws_route_table_association" "${associationLabel}" {
 
     )
 
-
-
     const quantity = Number(config.quantity ?? resource.quantity ?? 1)
-
-
 
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
 
@@ -1243,15 +1036,11 @@ resource "aws_route_table_association" "${associationLabel}" {
 
     }
 
-
-
     const name = config.instanceName ||
 
       resource.resourceName ||
 
       `ec2-${index + 1}`
-
-
 
     const securityGroupMode = network.securityGroupMode || 'existing'
 
@@ -1259,13 +1048,9 @@ resource "aws_route_table_association" "${associationLabel}" {
 
     let securityGroupIdsExpression = '[]'
 
-
-
     if (securityGroupMode === 'new') {
 
       const securityGroup = network.securityGroup || {}
-
-
 
       const securityGroupName = required(
 
@@ -1275,8 +1060,6 @@ resource "aws_route_table_association" "${associationLabel}" {
 
       )
 
-
-
       const securityGroupDescription = required(
 
         securityGroup.description,
@@ -1285,15 +1068,11 @@ resource "aws_route_table_association" "${associationLabel}" {
 
       )
 
-
-
       const securityGroupLabel = terraformName(`security_group_${index + 1}`)
 
       const ingressRules = securityGroup.ingressRules || []
 
       const egressRules = securityGroup.egressRules || []
-
-
 
       if (!/^[A-Za-z0-9._-]{1,255}$/.test(securityGroupName)) {
 
@@ -1301,29 +1080,21 @@ resource "aws_route_table_association" "${associationLabel}" {
 
       }
 
-
-
       if (!Array.isArray(ingressRules) || !Array.isArray(egressRules)) {
 
         throw new Error('Security group inbound and outbound rules must be arrays')
 
       }
 
-
-
       function renderSecurityGroupRule(rule, direction, ruleIndex) {
 
         const protocol = String(rule.protocol || '').toLowerCase()
-
-
 
         if (!['tcp', 'udp', 'icmp', '-1'].includes(protocol)) {
 
           throw new Error(`Invalid ${direction} rule protocol at position ${ruleIndex + 1}`)
 
         }
-
-
 
         const cidr = required(
 
@@ -1333,23 +1104,15 @@ resource "aws_route_table_association" "${associationLabel}" {
 
         )
 
-
-
         parseCidr(cidr)
 
-
-
         let ports = ''
-
-
 
         if (protocol === 'tcp' || protocol === 'udp') {
 
           const fromPort = Number(rule.fromPort)
 
           const toPort = Number(rule.toPort)
-
-
 
           if (
 
@@ -1372,8 +1135,6 @@ resource "aws_route_table_association" "${associationLabel}" {
             throw new Error(`${direction} rule ${ruleIndex + 1} must have a valid port range between 1 and 65535`)
 
           }
-
-
 
           ports = `
 
@@ -1399,8 +1160,6 @@ resource "aws_route_table_association" "${associationLabel}" {
 
         }
 
-
-
         if (
 
           direction === 'inbound' &&
@@ -1415,15 +1174,11 @@ resource "aws_route_table_association" "${associationLabel}" {
 
           const toPort = Number(rule.toPort)
 
-
-
           if (fromPort <= 22 && toPort >= 22) {
 
             warnings.push(`${name}: inbound SSH is open to 0.0.0.0/0. Restrict access to trusted IP ranges.`)
 
           }
-
-
 
           if (fromPort <= 3389 && toPort >= 3389) {
 
@@ -1432,8 +1187,6 @@ resource "aws_route_table_association" "${associationLabel}" {
           }
 
         }
-
-
 
         return `
 
@@ -1449,15 +1202,11 @@ resource "aws_route_table_association" "${associationLabel}" {
 
       }
 
-
-
       const ingressBlocks = ingressRules
 
         .map((rule, ruleIndex) => renderSecurityGroupRule(rule, 'inbound', ruleIndex))
 
         .join('')
-
-
 
       const egressBlocks = egressRules
 
@@ -1465,19 +1214,16 @@ resource "aws_route_table_association" "${associationLabel}" {
 
         .join('')
 
-
-
       if (egressRules.length === 0) {
 
         warnings.push(`${name}: no outbound rules were specified. AWS will retain its default allow-all outbound rule.`)
 
       }
 
-
-
       blocks.push(`
 
 resource "aws_security_group" "${securityGroupLabel}" {
+  provider = aws.${provider}
 
   name        = ${hcl(securityGroupName)}
 
@@ -1499,8 +1245,6 @@ ${egressBlocks}
 
 `)
 
-
-
       addPlanned('aws_security_group', securityGroupLabel, {
 
         securityGroupName,
@@ -1513,8 +1257,6 @@ ${egressBlocks}
 
       })
 
-
-
       securityGroupIdsExpression = `[aws_security_group.${securityGroupLabel}.id]`
 
     } else if (securityGroupMode === 'existing') {
@@ -1524,8 +1266,6 @@ ${egressBlocks}
         throw new Error('Security groups must be an array')
 
       }
-
-
 
       groups.forEach(group => validateId(group, 'sg', 'security group ID'))
 
@@ -1537,15 +1277,11 @@ ${egressBlocks}
 
     }
 
-
-
     const rootVolume = (resource.ebsVolumes || [])
 
       .find(volume => volume.deviceName === 'root') ||
 
       (resource.ebsVolumes || [])[0]
-
-
 
     const storageSize = Number(
 
@@ -1553,15 +1289,11 @@ ${egressBlocks}
 
     )
 
-
-
     const storageType = rootVolume?.volumeType ||
 
       resource.storageType ||
 
       'gp3'
-
-
 
     if (!Number.isInteger(storageSize) || storageSize < 1) {
 
@@ -1569,15 +1301,11 @@ ${egressBlocks}
 
     }
 
-
-
     if (!['gp3', 'gp2', 'io1', 'io2', 'standard'].includes(storageType)) {
 
       throw new Error(`Unsupported root EBS type: ${storageType}`)
 
     }
-
-
 
     if ((resource.ebsVolumes || []).length > 1) {
 
@@ -1589,17 +1317,11 @@ ${egressBlocks}
 
     }
 
-
-
     const profileMode =
 
       config.instanceProfileMode || resource.instanceProfileMode || 'none'
 
-
-
     let profileRef = 'null'
-
-
 
     if (profileMode === 'existing') {
 
@@ -1625,8 +1347,6 @@ ${egressBlocks}
 
     }
 
-
-
     const amiConfig = getAmiConfiguration(
 
       config.operatingSystem || resource.operatingSystem || 'Linux',
@@ -1635,27 +1355,20 @@ ${egressBlocks}
 
     )
 
-
-
-    const amiLabel = `ami_${terraformName(amiConfig.name)}`
-
-
+    const amiLabel = `ami_${terraformName(amiConfig.name)}_${terraformName(resourceRegion)}`
 
     if (!amiConfigurations.has(amiLabel)) {
 
       amiConfigurations.set(amiLabel, amiConfig)
 
-
-
       blocks.push(`
 
 data "aws_ami" "${amiLabel}" {
+  provider = aws.${provider}
 
   most_recent = true
 
   owners      = ${tfList(amiConfig.owners)}
-
-
 
   filter {
 
@@ -1665,8 +1378,6 @@ data "aws_ami" "${amiLabel}" {
 
   }
 
-
-
   filter {
 
     name   = "state"
@@ -1674,8 +1385,6 @@ data "aws_ami" "${amiLabel}" {
     values = ["available"]
 
   }
-
-
 
   filter {
 
@@ -1691,19 +1400,13 @@ data "aws_ami" "${amiLabel}" {
 
     }
 
-
-
     const amiReference = `data.aws_ami.${amiLabel}.id`
-
-
 
     warnings.push(
 
-      `${name}: AMI will be looked up automatically for ${config.operatingSystemType || resource.operatingSystemType || config.operatingSystem || resource.operatingSystem} in ${region}.`
+      `${name}: AMI will be looked up automatically for ${config.operatingSystemType || resource.operatingSystemType || config.operatingSystem || resource.operatingSystem} in ${resourceRegion}.`
 
     )
-
-
 
     for (let instance = 1; instance <= quantity; instance++) {
 
@@ -1711,15 +1414,15 @@ data "aws_ami" "${amiLabel}" {
 
       const instanceName = quantity === 1 ? name : `${name}-${instance}`
 
-
-
       blocks.push(`
 
 module "${moduleLabel}" {
 
   source = "../../modules/ec2"
 
-
+  providers = {
+    aws = aws.${provider}
+  }
 
   ami_id                      = ${amiReference}
 
@@ -1755,8 +1458,6 @@ module "${moduleLabel}" {
 
 `)
 
-
-
       addPlanned('aws_instance', moduleLabel, {
 
         instanceName,
@@ -1771,47 +1472,30 @@ module "${moduleLabel}" {
 
   })
 
-
+  const providerBlocks = uniqueRegions.map(selectedRegion => `
+provider "aws" {
+  alias  = "${providerAlias(selectedRegion)}"
+  region = ${hcl(selectedRegion)}
+}`).join('\n')
 
   const providerTf = `
-
 terraform {
-
   required_version = ">= 1.5.0"
 
-
-
   required_providers {
-
     aws = {
-
       source  = "hashicorp/aws"
-
       version = "~> 6.0"
-
     }
-
   }
-
 }
 
-
-
-provider "aws" {
-
-  region = ${hcl(region)}
-
-}
-
+${providerBlocks}
 `
-
-
 
   fs.mkdirSync(terraformFolder, { recursive: true })
 
   fs.mkdirSync(providerCache, { recursive: true })
-
-
 
   fs.writeFileSync(
 
@@ -1821,8 +1505,6 @@ provider "aws" {
 
   )
 
-
-
   fs.writeFileSync(
 
     path.join(terraformFolder, 'main.tf'),
@@ -1831,8 +1513,6 @@ provider "aws" {
 
   )
 
-
-
   const env = {
 
     ...process.env,
@@ -1840,8 +1520,6 @@ provider "aws" {
     TF_PLUGIN_CACHE_DIR: providerCache
 
   }
-
-
 
   function runTerraform(args) {
 
@@ -1863,13 +1541,9 @@ provider "aws" {
 
   }
 
-
-
   let initOutput
 
   let validateOutput
-
-
 
   try {
 
@@ -1882,8 +1556,6 @@ provider "aws" {
       '-no-color'
 
     ])
-
-
 
     validateOutput = runTerraform([
 
@@ -1911,8 +1583,6 @@ provider "aws" {
 
   }
 
-
-
   const mockPlan = {
 
     ticketId: bom.ticketId,
@@ -1922,6 +1592,8 @@ provider "aws" {
     cloudProvider: 'AWS',
 
     region,
+
+    regions: uniqueRegions,
 
     planType: 'SIMULATED',
 
@@ -1947,8 +1619,6 @@ provider "aws" {
 
   }
 
-
-
   fs.writeFileSync(
 
     path.join(terraformFolder, 'mock-plan.json'),
@@ -1956,8 +1626,6 @@ provider "aws" {
     JSON.stringify(mockPlan, null, 2)
 
   )
-
-
 
   return {
 
@@ -1972,8 +1640,6 @@ provider "aws" {
   }
 
 }
-
-
 
 module.exports = {
 

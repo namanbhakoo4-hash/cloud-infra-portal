@@ -75,6 +75,8 @@ const newVpc = () => ({
 
   service: 'VPC',
 
+  region: '',
+
   resourceName: '',
 
   vpcConfiguration: {
@@ -121,6 +123,8 @@ const newEc2 = () => ({
   resourceKey: newKey(),
 
   service: 'EC2',
+
+  region: '',
 
   resourceName: '',
 
@@ -318,7 +322,7 @@ function allocateSubnetCidr(vpcCidrValue, subnetList, prefix, excludeIndex = -1)
   return ''
 }
 
-function validateResources(resources, region, instanceTypes) {
+function validateResources(resources, instanceTypes) {
 
   const keys = new Set()
 
@@ -343,6 +347,11 @@ function validateResources(resources, region, instanceTypes) {
     }
 
     keys.add(resource.resourceKey)
+
+    const resourceRegion = String(resource.region || '').trim()
+    if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/.test(resourceRegion)) {
+      return `${label}: select a valid AWS Region.`
+    }
 
     if (resource.service !== 'VPC') continue
 
@@ -447,7 +456,7 @@ const previousCidrs = []
 
       previousCidrs.push(cidr)
 
-      if (!new RegExp(`^${region}[a-z]$`).test(
+      if (!new RegExp(`^${resourceRegion}[a-z]$`).test(
 
         subnet.availabilityZone
 
@@ -589,6 +598,10 @@ const previousCidrs = []
     const config = resource.ec2Configuration
 
     const network = config.network
+    const ec2Region = String(resource.region || '').trim()
+    if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/.test(ec2Region)) {
+      return `${label}: select a valid AWS Region.`
+    }
 
     if (!instanceTypes.some(
 
@@ -634,6 +647,10 @@ const previousCidrs = []
 
       if (!vpc) {
         return `${label}: select a VPC resource in this BOM.`
+      }
+
+      if (ec2Region !== vpc.region) {
+        return `${label}: EC2 must use the same AWS Region (${vpc.region}) as its selected BOM VPC.`
       }
 
       if (!subnet || subnet.vpcKey !== network.vpcResourceKey) {
@@ -820,8 +837,6 @@ function UserDashboard() {
 
   const [environment, setEnvironment] = useState('Development')
 
-  const [region, setRegion] = useState('')
-
   const [justification, setJustification] = useState('')
 
   const [regions, setRegions] = useState([])
@@ -875,6 +890,12 @@ function UserDashboard() {
       active?.ec2Configuration?.network?.vpcResourceKey
 
   )
+
+  const activeVpcRegion = isVpc
+    ? active?.region || ''
+    : isEc2 && active?.ec2Configuration?.network?.vpcSource === 'bom'
+      ? selectedVpc?.region || ''
+      : ''
 
   const selectedSubnets = selectedVpc
     ? selectedVpc.vpcConfiguration?.mode === 'existing'
@@ -1148,78 +1169,40 @@ function UserDashboard() {
 
   }
 
-  async function loadMasterData(
-
-    provider = 'aws',
-
-    selectedRegion = ''
-
-  ) {
-
+  async function loadMasterData(provider = 'aws') {
     setMasterDataLoading(true)
-
     try {
-
-      const categories = ['region', 'instanceType']
-
-      const results = await Promise.all(
-
-        categories.map(async (category) => {
-
-          const response = await fetch(
-
-            `${API}/api/master-data/category/${category}?cloudProvider=${provider}`,
-
-            { headers: authHeaders(), cache: 'no-store' }
-
-          )
-
-          const data = await response.json()
-
-          if (!response.ok) {
-
-            throw new Error(
-
-              data.message || 'Unable to load master data.'
-
-            )
-
-          }
-
-          return (data.masterData || []).filter(
-
-            (item) => item.cloudProvider === provider
-
-          )
-
+      const [regionsResponse, instanceResponse] = await Promise.all([
+        fetch(`${API}/api/master-data/regions`, {
+          headers: authHeaders(),
+          cache: 'no-store'
+        }),
+        fetch(`${API}/api/master-data/category/instanceType?cloudProvider=${provider}`, {
+          headers: authHeaders(),
+          cache: 'no-store'
         })
-
-      )
-
-      setRegions(results[0])
-
-      setInstanceTypes(results[1])
-
-      setRegion(
-
-        results[0].some((item) => item.value === selectedRegion)
-
-          ? selectedRegion
-
-          : results[0][0]?.value || ''
-
-      )
-
+      ])
+      const [regionsData, instanceData] = await Promise.all([
+        regionsResponse.json(),
+        instanceResponse.json()
+      ])
+      if (!instanceResponse.ok) {
+        throw new Error(instanceData.message || 'Unable to load EC2 instance types.')
+      }
+      setInstanceTypes((instanceData.masterData || []).filter(
+        (item) => item.cloudProvider === provider
+      ))
+      if (!regionsResponse.ok) {
+        setRegions([])
+        throw new Error(regionsData.message || 'Unable to load AWS Regions.')
+      }
+      setRegions(Array.isArray(regionsData.regions) ? regionsData.regions : [])
     } catch (error) {
-
       setMessage(error.message)
-
+      setRegions([])
     } finally {
-
       setMasterDataLoading(false)
-
     }
-
   }
 
   useEffect(() => {
@@ -1285,35 +1268,29 @@ function UserDashboard() {
   }, [])
 
   useEffect(() => {
-    if (!showForm || cloudProvider !== 'aws' || !region) {
+    if (!showForm || cloudProvider !== 'aws' || !activeVpcRegion) {
       setAvailabilityZones([])
       setAvailabilityZonesError('')
       setAvailabilityZonesLoading(false)
       return
     }
-
     const controller = new AbortController()
-
     async function loadAvailabilityZones() {
       setAvailabilityZonesLoading(true)
       setAvailabilityZonesError('')
-
       try {
         const response = await fetch(
-          `${API}/api/master-data/availability-zones?region=${encodeURIComponent(region)}`,
+          `${API}/api/master-data/availability-zones?region=${encodeURIComponent(activeVpcRegion)}`,
           {
             headers: authHeaders(),
             cache: 'no-store',
             signal: controller.signal
           }
         )
-
         const data = await response.json()
-
         if (!response.ok) {
           throw new Error(data.message || 'Unable to load AWS Availability Zones.')
         }
-
         setAvailabilityZones(Array.isArray(data.availabilityZones) ? data.availabilityZones : [])
       } catch (error) {
         if (error.name !== 'AbortError') {
@@ -1321,16 +1298,12 @@ function UserDashboard() {
           setAvailabilityZonesError(error.message || 'Unable to load AWS Availability Zones.')
         }
       } finally {
-        if (!controller.signal.aborted) {
-          setAvailabilityZonesLoading(false)
-        }
+        if (!controller.signal.aborted) setAvailabilityZonesLoading(false)
       }
     }
-
     loadAvailabilityZones()
-
     return () => controller.abort()
-  }, [showForm, cloudProvider, region])
+  }, [showForm, cloudProvider, activeVpcRegion])
 
   useEffect(() => {
 
@@ -1342,7 +1315,7 @@ function UserDashboard() {
 
       !isEc2 ||
 
-      !region ||
+      !(active?.region || (active?.ec2Configuration?.network?.vpcSource === 'bom' ? selectedVpc?.region : '')) ||
 
       !active.instanceType
 
@@ -1396,7 +1369,7 @@ function UserDashboard() {
 
               cloudProvider,
 
-              region,
+              region: active.region || (active.ec2Configuration?.network?.vpcSource === 'bom' ? selectedVpc?.region : ''),
 
               instanceType: active.instanceType,
 
@@ -1482,7 +1455,9 @@ function UserDashboard() {
 
     active?.storageType,
 
-    region,
+    active?.region,
+
+    selectedVpc?.region,
 
     cloudProvider
 
@@ -1540,6 +1515,8 @@ function UserDashboard() {
 
             ...resource,
 
+            region: resource.region || bom.region || '',
+
             vpcConfiguration: {
 
               ...defaults.vpcConfiguration,
@@ -1572,6 +1549,8 @@ function UserDashboard() {
             ...defaults,
 
             ...resource,
+
+            region: resource.region || bom.region || '',
 
             ec2Configuration: {
 
@@ -1625,7 +1604,7 @@ function UserDashboard() {
 
     setShowForm(true)
 
-    await loadMasterData(bom.cloudProvider || 'aws', bom.region)
+    await loadMasterData(bom.cloudProvider || 'aws')
 
     window.scrollTo({ top: 0, behavior: 'smooth' })
 
@@ -1641,7 +1620,11 @@ function UserDashboard() {
 
       environment,
 
-      region,
+      region: resources.find((item) =>
+        addedResourceKeys.includes(item.resourceKey) &&
+        ['VPC', 'EC2'].includes(item.service) &&
+        item.region
+      )?.region || '',
 
       justification: justification.trim(),
 
@@ -1652,6 +1635,8 @@ function UserDashboard() {
           return {
 
             resourceKey: item.resourceKey,
+
+            region: item.region,
 
             resourceName: item.vpcConfiguration?.name || item.vpcConfiguration?.existingVpcId || item.resourceName || 'VPC',
 
@@ -1672,6 +1657,10 @@ function UserDashboard() {
         return {
 
           resourceKey: item.resourceKey,
+
+          region: item.region || (item.ec2Configuration?.network?.vpcSource === 'bom'
+            ? resources.find((candidate) => candidate.resourceKey === item.ec2Configuration.network.vpcResourceKey)?.region
+            : ''),
 
           resourceName: item.resourceName,
 
@@ -1736,7 +1725,6 @@ function UserDashboard() {
 
       const missingProjectInformation = []
       if (!projectName.trim()) missingProjectInformation.push('Project Name')
-      if (!region) missingProjectInformation.push('AWS Region')
       if (!justification.trim()) missingProjectInformation.push('Justification')
 
       if (missingProjectInformation.length > 0) {
@@ -1753,7 +1741,6 @@ function UserDashboard() {
 
       const validationError = validateResources(
         configuredResources,
-        region,
         instanceTypes
       )
 
@@ -1813,6 +1800,31 @@ function UserDashboard() {
         </div>
 
         <div className="user-form-grid">
+
+          <Field label="AWS Region *">
+            <select
+              value={active.region || ''}
+              onChange={(e) => updateActive({
+                region: e.target.value,
+                vpcConfiguration: {
+                  ...active.vpcConfiguration,
+                  subnets: (active.vpcConfiguration.subnets || []).map((subnet) => ({
+                    ...subnet,
+                    availabilityZone: ''
+                  }))
+                }
+              })}
+              disabled={masterDataLoading}
+              required
+            >
+              <option value="">Select AWS Region</option>
+              {regions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.name} ({item.value})
+                </option>
+              ))}
+            </select>
+          </Field>
 
           <Field label="VPC Option">
 
@@ -2506,6 +2518,25 @@ function UserDashboard() {
 
         <div className="user-form-grid">
 
+          <Field label="AWS Region *">
+            <select
+              value={active.region || (network.vpcSource === 'bom' ? selectedVpc?.region || '' : '')}
+              onChange={(e) => updateActive({ region: e.target.value })}
+              disabled={masterDataLoading || network.vpcSource === 'bom'}
+              required
+            >
+              <option value="">Select AWS Region</option>
+              {regions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.name} ({item.value})
+                </option>
+              ))}
+            </select>
+            {network.vpcSource === 'bom' && (
+              <small>Region is inherited from the selected BOM VPC.</small>
+            )}
+          </Field>
+
           <Field label="EC2 Resource Name">
 
             <input
@@ -2916,19 +2947,15 @@ function UserDashboard() {
 
                   value={network.vpcResourceKey}
 
-                  onChange={(e) =>
-
+                  onChange={(e) => {
+                    const selected = vpcOptions.find((item) => item.resourceKey === e.target.value)
                     updateEc2Network({
-
                       vpcResourceKey: e.target.value,
-
                       subnetResourceKey: '',
-
                       associatePublicIpAddress: false
-
                     })
-
-                  }
+                    if (selected?.region) updateActive({ region: selected.region })
+                  }}
 
                 >
 
@@ -3985,43 +4012,7 @@ function UserDashboard() {
 
                 </Field>
 
-                <Field label="AWS Region *">
 
-                  <select
-
-                    value={region}
-
-                    onChange={(e) => setRegion(e.target.value)}
-
-                    disabled={masterDataLoading}
-
-                  >
-
-                    {!regions.length && (
-
-                      <option value="">No regions loaded</option>
-
-                    )}
-
-                    {regions.map((item) => (
-
-                      <option
-
-                        key={item.value}
-
-                        value={item.value}
-
-                      >
-
-                        {item.name} ({item.value})
-
-                      </option>
-
-                    ))}
-
-                  </select>
-
-                </Field>
 
               </div>
 
@@ -4365,9 +4356,7 @@ function UserDashboard() {
 
                     masterDataLoading ||
 
-                    cloudProvider !== 'aws' ||
-
-                    !region
+                    cloudProvider !== 'aws'
 
                   }
 
