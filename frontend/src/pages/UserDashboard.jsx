@@ -1963,6 +1963,14 @@ function UserDashboard() {
                   Add existing subnet
                 </button>
               </div>
+
+              <div style={{ gridColumn: '1 / -1' }}>
+                <RouteTableBuilder
+                  routeTables={config.routeTables || []}
+                  subnets={config.existingSubnets || []}
+                  onChange={updateRouteTables}
+                />
+              </div>
             </>
 
           ) : (
@@ -2431,14 +2439,6 @@ function UserDashboard() {
               style={{ marginTop: 20 }}
 
             >
-
-              <div style={{ gridColumn: '1 / -1' }}>
-                <RouteTableBuilder
-                  routeTables={config.routeTables || []}
-                  subnets={config.subnets || []}
-                  onChange={updateRouteTables}
-                />
-              </div>
 
               <Field label="Internet Gateway">
 
