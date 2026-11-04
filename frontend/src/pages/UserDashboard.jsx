@@ -23,6 +23,17 @@ const PROVIDERS = {
 
 const CIDR_PREFIXES = Array.from({ length: 21 }, (_, index) => index + 8)
 
+const SUBNET_ADDRESS_OPTIONS = Array.from({ length: 13 }, (_, index) => {
+  const prefix = index + 16
+  const addresses = 2 ** (32 - prefix)
+
+  return {
+    prefix,
+    addresses,
+    label: new Intl.NumberFormat('en-US').format(addresses)
+  }
+})
+
 const EBS_TYPES = [
 
   ['gp3', 'General Purpose SSD (gp3)'],
@@ -274,19 +285,27 @@ function intToIp(number) {
     .join('.')
 }
 
-function usableIpsForCidr(cidrValue) {
+function ipv4AddressesForCidr(cidrValue) {
   const cidr = parseCidr(cidrValue)
-  if (!cidr) return 251
-  return Math.max(0, (2 ** (32 - cidr.prefix)) - 5)
+  if (!cidr) return 0
+  return 2 ** (32 - cidr.prefix)
 }
 
-function prefixForUsableIps(usableIps, vpcPrefix) {
-  const requested = Number(usableIps)
-  const minimumPrefix = Math.max(8, Number(vpcPrefix) || 16)
-  if (!Number.isInteger(requested) || requested < 11 || minimumPrefix > 28) return null
+function prefixForAddressCapacity(requiredAddresses, vpcPrefix) {
+  const requested = Number(requiredAddresses)
+  const minimumPrefix = Math.max(16, Number(vpcPrefix) || 16)
+
+  if (
+    !Number.isInteger(requested) ||
+    requested < 16 ||
+    requested > 65536 ||
+    minimumPrefix > 28
+  ) {
+    return null
+  }
 
   for (let prefix = 28; prefix >= minimumPrefix; prefix -= 1) {
-    if ((2 ** (32 - prefix)) - 5 >= requested) return prefix
+    if (2 ** (32 - prefix) >= requested) return prefix
   }
 
   return null
@@ -418,15 +437,17 @@ const previousCidrs = []
 
       }
 
-      const requestedUsableIps = Number(subnet.usableIpCount)
+      const requestedAddresses = Number(
+        subnet.usableIpCount || ipv4AddressesForCidr(subnet.ipv4Cidr)
+      )
 
       if (
-        !Number.isInteger(requestedUsableIps) ||
-        requestedUsableIps < 11 ||
-        requestedUsableIps > usableIpsForCidr(subnet.ipv4Cidr)
+        !Number.isInteger(requestedAddresses) ||
+        requestedAddresses < 16 ||
+        requestedAddresses > ipv4AddressesForCidr(subnet.ipv4Cidr)
       ) {
 
-        return `${subnetLabel}: enter a usable IP requirement between 11 and the capacity of its selected CIDR.`
+        return `${subnetLabel}: select an IPv4 address requirement between 16 and the capacity of its selected CIDR.`
 
       }
 
@@ -1017,7 +1038,7 @@ function UserDashboard() {
 
     if (Object.prototype.hasOwnProperty.call(changes, 'usableIpCount')) {
       const requested = changes.usableIpCount
-      const prefix = prefixForUsableIps(requested, parseCidr(active.vpcConfiguration.ipv4Cidr)?.prefix)
+      const prefix = prefixForAddressCapacity(requested, parseCidr(active.vpcConfiguration.ipv4Cidr)?.prefix)
 
       if (prefix) {
         const ipv4Cidr = allocateSubnetCidr(
@@ -1034,7 +1055,7 @@ function UserDashboard() {
     }
 
     if (Object.prototype.hasOwnProperty.call(changes, 'ipv4Cidr')) {
-      updatedSubnet.usableIpCount = usableIpsForCidr(changes.ipv4Cidr)
+      updatedSubnet.usableIpCount = ipv4AddressesForCidr(changes.ipv4Cidr)
     }
 
     updateVpc({
@@ -2296,22 +2317,36 @@ function UserDashboard() {
 
                   </Field>
 
-                                    <Field label="Required Usable IPv4 Addresses *">
+                  <Field label="Required IPv4 Address Capacity *">
 
-                    <input
-                      type="number"
-                      min="11"
-                      step="1"
-                      value={subnet.usableIpCount ?? usableIpsForCidr(subnet.ipv4Cidr)}
+                    <select
+                      value={String(
+                        subnet.ipv4Cidr
+                          ? ipv4AddressesForCidr(subnet.ipv4Cidr)
+                          : subnet.usableIpCount || ''
+                      )}
                       onChange={(e) =>
                         updateSubnet(index, {
                           usableIpCount: e.target.value
                         })
                       }
                       required
-                    />
+                    >
+                      <option value="">Select address capacity</option>
+                      {SUBNET_ADDRESS_OPTIONS
+                        .filter((option) =>
+                          option.prefix >= (parseCidr(config.ipv4Cidr)?.prefix || 16)
+                        )
+                        .map((option) => (
+                          <option key={option.prefix} value={option.addresses}>
+                            {option.label}
+                          </option>
+                        ))}
+                    </select>
 
-                    <small>AWS reserves 5 IPv4 addresses in every subnet. Minimum: 11 usable addresses.</small>
+                    <small>
+                      Select the total IPv4 address capacity. CIDR sizing uses the full block size; AWS still reserves 5 addresses when the subnet is created.
+                    </small>
 
                   </Field>
 
@@ -2342,7 +2377,7 @@ function UserDashboard() {
                     <small>
                       Allocated CIDR: {subnet.ipv4Cidr || 'No available CIDR block'}
                       {' · '}
-                      {subnet.ipv4Cidr ? `${usableIpsForCidr(subnet.ipv4Cidr)} usable IPs` : 'Usable IP capacity unavailable'}
+                      {subnet.ipv4Cidr ? `${new Intl.NumberFormat('en-US').format(ipv4AddressesForCidr(subnet.ipv4Cidr))} total IPv4 addresses` : 'IPv4 capacity unavailable'}
                     </small>
 
                   </Field>
