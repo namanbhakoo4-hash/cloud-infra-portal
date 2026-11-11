@@ -1,5 +1,5 @@
 function BomCsvDownload({ bomId, ticketId, className = '' }) {
-  const handleDownload = async () => {
+  const downloadFile = async (format) => {
     try {
       const token = localStorage.getItem('token')
 
@@ -7,8 +7,10 @@ function BomCsvDownload({ bomId, ticketId, className = '' }) {
         throw new Error('Please log in again.')
       }
 
+      const isExcel = format === 'xlsx'
+      const extension = isExcel ? 'xlsx' : 'csv'
       const response = await fetch(
-        `http://localhost:5000/api/bom/${bomId}/export.csv`,
+        `http://localhost:5000/api/bom/${bomId}/export.${extension}`,
         {
           method: 'GET',
           headers: {
@@ -18,13 +20,13 @@ function BomCsvDownload({ bomId, ticketId, className = '' }) {
       )
 
       if (!response.ok) {
-        let message = 'Unable to download BOM CSV.'
+        let message = `Unable to download BOM ${isExcel ? 'Excel' : 'CSV'}.`
 
         try {
           const data = await response.json()
           message = data.message || message
         } catch {
-          message = 'Unable to download BOM CSV.'
+          message = `Unable to download BOM ${isExcel ? 'Excel' : 'CSV'}.`
         }
 
         throw new Error(message)
@@ -32,30 +34,37 @@ function BomCsvDownload({ bomId, ticketId, className = '' }) {
 
       const blob = await response.blob()
       const downloadUrl = window.URL.createObjectURL(blob)
-
       const link = document.createElement('a')
       link.href = downloadUrl
-      link.download = `${ticketId || 'BOM'}.csv`
-
+      link.download = `${ticketId || 'BOM'}.${extension}`
       document.body.appendChild(link)
       link.click()
       link.remove()
-
       window.URL.revokeObjectURL(downloadUrl)
     } catch (error) {
-      alert(error.message || 'CSV download failed.')
+      alert(error.message || 'BOM download failed.')
     }
   }
 
   return (
-    <button
-      type="button"
-      className={className}
-      onClick={handleDownload}
-      disabled={!bomId}
-    >
-      Download CSV
-    </button>
+    <div className="flex flex-wrap gap-2">
+      <button
+        type="button"
+        className={className}
+        onClick={() => downloadFile('csv')}
+        disabled={!bomId}
+      >
+        Download CSV
+      </button>
+      <button
+        type="button"
+        className={className}
+        onClick={() => downloadFile('xlsx')}
+        disabled={!bomId}
+      >
+        Download Excel
+      </button>
+    </div>
   )
 }
 

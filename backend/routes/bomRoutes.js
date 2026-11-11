@@ -18,7 +18,8 @@ const {
 } = require('../services/terraformService')
 
 const {
-  buildBomCsv
+  buildBomCsv,
+  buildBomXlsx
 } = require('../services/bomCsvExportService')
 
 // =====================================================
@@ -544,6 +545,61 @@ router.get(
       return res.status(500).json({
         message: 'Failed to export BOM CSV'
       })
+    }
+  }
+)
+
+
+// =====================================================
+// USER AND CLOUD ENGINEER: EXPORT BOM EXCEL
+// =====================================================
+
+router.get(
+  '/:id/export.xlsx',
+  authMiddleware,
+  roleMiddleware('user', 'cloud_engineer'),
+  async (req, res) => {
+    try {
+      const bom = await BOM.findById(req.params.id)
+        .populate('reviewedBy', 'name')
+
+      if (!bom) {
+        return res.status(404).json({ message: 'BOM not found' })
+      }
+
+      if (
+        req.user.role === 'user' &&
+        String(bom.createdBy) !== String(req.user.id)
+      ) {
+        return res.status(403).json({
+          message: 'You do not have permission to export this BOM.'
+        })
+      }
+
+      const workbookBuffer = await buildBomXlsx(bom)
+      const safeTicketId = String(bom.ticketId || 'BOM')
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+      const filename = `${safeTicketId}.xlsx`
+
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      )
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`
+      )
+      res.setHeader('Cache-Control', 'no-store')
+
+      return res.send(Buffer.from(workbookBuffer))
+    } catch (error) {
+      console.error('BOM Excel export error:', error)
+
+      if (error.name === 'CastError') {
+        return res.status(400).json({ message: 'Invalid BOM ID' })
+      }
+
+      return res.status(500).json({ message: 'Failed to export BOM Excel file' })
     }
   }
 )

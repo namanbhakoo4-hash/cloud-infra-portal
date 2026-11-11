@@ -7,6 +7,7 @@ import './UserDashboard.css'
 
 import './ExistingSubnetButtons.css'
 import RouteTableBuilder from '../components/RouteTableBuilder'
+import BomCsvDownload from '../components/BomCsvDownload'
 import '../components/RouteTableBuilder.css'
 
 const API = 'http://localhost:5000'
@@ -1121,46 +1122,6 @@ function UserDashboard() {
 
   }
 
-  async function downloadBomCsv(bom) {
-    try {
-      setMessage('')
-
-      const response = await fetch(
-        `${API}/api/bom/${bom._id}/export.csv`,
-        {
-          headers: authHeaders()
-        }
-      )
-
-      if (!response.ok) {
-        let errorMessage = 'Unable to download BOM CSV.'
-
-        try {
-          const data = await response.json()
-          errorMessage = data.message || errorMessage
-        } catch {
-          errorMessage = 'Unable to download BOM CSV.'
-        }
-
-        throw new Error(errorMessage)
-      }
-
-      const csvBlob = await response.blob()
-      const downloadUrl = window.URL.createObjectURL(csvBlob)
-      const link = document.createElement('a')
-
-      link.href = downloadUrl
-      link.download = `BOM-${String(bom.ticketId || bom._id).replace(/[^A-Za-z0-9_-]/g, '_')}.csv`
-
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-
-      window.URL.revokeObjectURL(downloadUrl)
-    } catch (error) {
-      setMessage(error.message || 'Unable to download BOM CSV.')
-    }
-  }
 
   async function loadBoms() {
 
@@ -4553,13 +4514,11 @@ function UserDashboard() {
 
                       <td>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                          <button
-                            type="button"
+                          <BomCsvDownload
+                            bomId={bom._id}
+                            ticketId={bom.ticketId}
                             className="user-secondary-btn"
-                            onClick={() => downloadBomCsv(bom)}
-                          >
-                            Download CSV
-                          </button>
+                          />
 
                           {bom.status === 'Changes Requested' ? (
                             <button
