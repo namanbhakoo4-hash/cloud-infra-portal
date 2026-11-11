@@ -1,3 +1,4 @@
+
 const mongoose = require('mongoose')
 
 const networkSchema = new mongoose.Schema({
@@ -32,7 +33,8 @@ const existingVpcSubnetSchema = new mongoose.Schema({
     type: String,
     enum: ['public', 'private'],
     default: 'private'
-  }
+  },
+  ipv4Cidr: { type: String, trim: true, default: '' }
 }, { _id: false })
 
 const vpcConfigurationSchema = new mongoose.Schema({
@@ -53,8 +55,13 @@ const vpcConfigurationSchema = new mongoose.Schema({
   publicQuantity: { type: Number, min: 0, max: 100, default: 0 },
   privateQuantity: { type: Number, min: 0, max: 100, default: 0 },
   subnets: { type: [vpcSubnetSchema], default: [] },
+  existingVpcCidr: { type: String, trim: true, default: '' },
   existingSubnets: {
     type: [existingVpcSubnetSchema],
+    default: []
+  },
+  createdSubnets: {
+    type: [vpcSubnetSchema],
     default: []
   },
   existingRouteTableId: {

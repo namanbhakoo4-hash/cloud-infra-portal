@@ -121,7 +121,11 @@ const newVpc = () => ({
 
     existingVpcId: '',
 
-    existingSubnets: [{ resourceKey: newKey(), subnetId: '', subnetType: 'private' }],
+    existingVpcCidr: '',
+
+    existingSubnets: [{ resourceKey: newKey(), subnetId: '', subnetType: 'private', ipv4Cidr: '' }],
+
+    createdSubnets: [],
 
     existingRouteTableId: '',
     routeTables: []
@@ -387,6 +391,24 @@ function validateResources(resources, instanceTypes) {
         return `${label}: add at least one existing subnet ID.`
       }
 
+      const createdSubnetList = Array.isArray(config.createdSubnets)
+        ? config.createdSubnets
+        : []
+      const needsCidrValidation = createdSubnetList.length > 0
+      const existingVpcCidr = needsCidrValidation
+        ? parseCidr(config.existingVpcCidr)
+        : null
+
+      if (needsCidrValidation && (
+        !existingVpcCidr ||
+        existingVpcCidr.prefix < 16 ||
+        existingVpcCidr.prefix > 28
+      )) {
+        return `${label}: enter a valid existing VPC CIDR (/16 to /28) before creating new subnets.`
+      }
+
+      const occupiedCidrs = []
+
       for (const [subnetIndex, subnet] of config.existingSubnets.entries()) {
         if (!awsId(subnet.subnetId, 'subnet')) {
           return `${label}: enter a valid subnet ID for existing subnet ${subnetIndex + 1}.`
@@ -397,9 +419,79 @@ function validateResources(resources, instanceTypes) {
         if (subnets.has(subnet.resourceKey)) {
           return `${label}: duplicate existing subnet entry.`
         }
+
+        if (needsCidrValidation) {
+          const existingCidr = parseCidr(subnet.ipv4Cidr)
+          if (
+            !existingCidr ||
+            existingCidr.prefix < existingVpcCidr.prefix ||
+            existingCidr.prefix > 28
+          ) {
+            return `${label}: enter a valid CIDR (/${existingVpcCidr.prefix} to /28) for existing subnet ${subnetIndex + 1}.`
+          }
+          if (
+            existingCidr.start < existingVpcCidr.start ||
+            existingCidr.end > existingVpcCidr.end
+          ) {
+            return `${label}: existing subnet ${subnetIndex + 1} CIDR must be inside the existing VPC CIDR.`
+          }
+          if (occupiedCidrs.some((other) =>
+            existingCidr.start <= other.end && other.start <= existingCidr.end
+          )) {
+            return `${label}: existing subnet ${subnetIndex + 1} CIDR overlaps another subnet.`
+          }
+          occupiedCidrs.push(existingCidr)
+        }
+
         subnets.set(subnet.resourceKey, {
           vpcKey: resource.resourceKey,
           type: subnet.subnetType || 'private'
+        })
+      }
+
+      for (const [subnetIndex, subnet] of createdSubnetList.entries()) {
+        const subnetLabel = `${label}, new subnet ${subnetIndex + 1}`
+        const cidr = parseCidr(subnet.ipv4Cidr)
+
+        if (
+          !cidr ||
+          cidr.prefix < existingVpcCidr.prefix ||
+          cidr.prefix > 28
+        ) {
+          return `${subnetLabel}: enter a valid subnet CIDR within the existing VPC prefix range.`
+        }
+        if (
+          cidr.start < existingVpcCidr.start ||
+          cidr.end > existingVpcCidr.end
+        ) {
+          return `${subnetLabel}: CIDR must be inside the existing VPC.`
+        }
+        if (occupiedCidrs.some((other) =>
+          cidr.start <= other.end && other.start <= cidr.end
+        )) {
+          return `${subnetLabel}: subnet CIDR overlaps an existing or newly created subnet.`
+        }
+        occupiedCidrs.push(cidr)
+
+        if (!subnet.resourceKey) {
+          return `${subnetLabel}: subnet is missing its resource key.`
+        }
+        if (!String(subnet.name || '').trim()) {
+          return `${subnetLabel}: enter a subnet name.`
+        }
+        if (subnets.has(subnet.resourceKey)) {
+          return `${subnetLabel}: duplicate subnet entry.`
+        }
+        if (!['public', 'private'].includes(subnet.subnetType)) {
+          return `${subnetLabel}: select public or private subnet type.`
+        }
+        if (!new RegExp(`^${resourceRegion}[a-z]$`).test(subnet.availabilityZone || '')) {
+          return `${subnetLabel}: select an availability zone in ${resourceRegion}.`
+        }
+
+        subnets.set(subnet.resourceKey, {
+          vpcKey: resource.resourceKey,
+          type: subnet.subnetType
         })
       }
 
@@ -921,11 +1013,18 @@ function UserDashboard() {
 
   const selectedSubnets = selectedVpc
     ? selectedVpc.vpcConfiguration?.mode === 'existing'
-      ? (selectedVpc.vpcConfiguration.existingSubnets || []).map((subnet, index) => ({
-          resourceKey: subnet.resourceKey,
-          name: subnet.name || `Existing subnet ${index + 1}`,
-          subnetType: subnet.subnetType || 'private'
-        }))
+      ? [
+          ...(selectedVpc.vpcConfiguration.existingSubnets || []).map((subnet, index) => ({
+            resourceKey: subnet.resourceKey,
+            name: subnet.name || `Existing subnet ${index + 1}`,
+            subnetType: subnet.subnetType || 'private',
+            ipv4Cidr: subnet.ipv4Cidr || ''
+          })),
+          ...(selectedVpc.vpcConfiguration.createdSubnets || []).map((subnet, index) => ({
+            ...subnet,
+            name: subnet.name || `New subnet ${index + 1}`
+          }))
+        ]
       : selectedVpc.vpcConfiguration?.subnets || []
     : []
 
@@ -1062,6 +1161,15 @@ function UserDashboard() {
     updateVpc({
       subnets: currentSubnets.map((item, itemIndex) =>
         itemIndex === index ? updatedSubnet : item
+      )
+    })
+  }
+
+  function updateCreatedSubnet(index, changes) {
+    const currentSubnets = active.vpcConfiguration.createdSubnets || []
+    updateVpc({
+      createdSubnets: currentSubnets.map((subnet, subnetIndex) =>
+        subnetIndex === index ? { ...subnet, ...changes } : subnet
       )
     })
   }
@@ -1514,6 +1622,16 @@ function UserDashboard() {
               subnets: (resource.vpcConfiguration?.subnets || defaults.vpcConfiguration.subnets).map((subnet) => ({
                 ...subnet,
                 usableIpCount: subnet.usableIpCount ?? 0
+              })),
+
+              existingSubnets: (resource.vpcConfiguration?.existingSubnets || defaults.vpcConfiguration.existingSubnets).map((subnet) => ({
+                ...subnet,
+                ipv4Cidr: subnet.ipv4Cidr || ''
+              })),
+
+              createdSubnets: (resource.vpcConfiguration?.createdSubnets || []).map((subnet) => ({
+                ...subnet,
+                usableIpCount: subnet.usableIpCount ?? 0
               }))
 
             }
@@ -1793,6 +1911,10 @@ function UserDashboard() {
                   subnets: (active.vpcConfiguration.subnets || []).map((subnet) => ({
                     ...subnet,
                     availabilityZone: ''
+                  })),
+                  createdSubnets: (active.vpcConfiguration.createdSubnets || []).map((subnet) => ({
+                    ...subnet,
+                    availabilityZone: ''
                   }))
                 }
               })}
@@ -1840,6 +1962,14 @@ function UserDashboard() {
                   placeholder="vpc-0123456789abcdef0"
                 />
               </Field>
+              <Field label="Existing VPC CIDR * (Required when creating new subnets)">
+                <input
+                  value={config.existingVpcCidr || ''}
+                  onChange={(e) => updateVpc({ existingVpcCidr: e.target.value })}
+                  placeholder="10.0.0.0/16"
+                />
+                <small>Enter the IPv4 CIDR assigned to the existing VPC so new subnet ranges can be validated.</small>
+              </Field>
               <Field label="Existing Route Table ID (Optional)">
                 <input
                   value={config.existingRouteTableId || ''}
@@ -1863,6 +1993,18 @@ function UserDashboard() {
                               )
                             })}
                             placeholder="subnet-0123456789abcdef0"
+                          />
+                        </Field>
+
+                        <Field label={`Subnet ${index + 1} CIDR * (Required when creating new subnets)`}>
+                          <input
+                            value={subnet.ipv4Cidr || ''}
+                            onChange={(e) => updateVpc({
+                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, ipv4Cidr: e.target.value } : item
+                              )
+                            })}
+                            placeholder="10.0.1.0/24"
                           />
                         </Field>
 
@@ -1912,7 +2054,7 @@ function UserDashboard() {
                   onClick={() => updateVpc({
                     existingSubnets: [
                       ...(config.existingSubnets || []),
-                      { resourceKey: newKey(), subnetId: '', subnetType: 'private' }
+                      { resourceKey: newKey(), subnetId: '', subnetType: 'private', ipv4Cidr: '' }
                     ]
                   })}
                 >
@@ -1922,6 +2064,132 @@ function UserDashboard() {
                     </svg>
                   </span>
                   Add existing subnet
+                </button>
+              </div>
+
+              <div className="user-form-field existing-subnets-section" style={{ gridColumn: '1 / -1' }}>
+                <label>Create New Subnets Inside This VPC</label>
+                <p>
+                  These subnets will be created by Terraform inside the existing VPC. Enter CIDRs that are inside the VPC and do not overlap with any existing subnet. They will use the VPC's existing main route table by default.
+                </p>
+
+                <div className="existing-subnets-list">
+                  {(config.createdSubnets || []).map((subnet, index) => (
+                    <div className="existing-subnet-item" key={subnet.resourceKey || index}>
+                      <div className="user-form-grid">
+                        <Field label={`New Subnet ${index + 1} Name *`}>
+                          <input
+                            value={subnet.name || ''}
+                            onChange={(e) => updateCreatedSubnet(index, { name: e.target.value })}
+                            placeholder="app-private-subnet"
+                          />
+                        </Field>
+
+                        <Field label={`New Subnet ${index + 1} CIDR *`}>
+                          <input
+                            value={subnet.ipv4Cidr || ''}
+                            onChange={(e) => updateCreatedSubnet(index, { ipv4Cidr: e.target.value })}
+                            placeholder="10.0.3.0/24"
+                          />
+                        </Field>
+
+                        <Field label="Subnet Type *">
+                          <select
+                            value={subnet.subnetType || 'private'}
+                            onChange={(e) => updateCreatedSubnet(index, {
+                              subnetType: e.target.value,
+                              mapPublicIpOnLaunch: e.target.value === 'public' ? subnet.mapPublicIpOnLaunch === true : false
+                            })}
+                          >
+                            <option value="public">Public</option>
+                            <option value="private">Private</option>
+                          </select>
+                        </Field>
+
+                        <Field label="Availability Zone *">
+                          <select
+                            value={subnet.availabilityZone || ''}
+                            onChange={(e) => updateCreatedSubnet(index, { availabilityZone: e.target.value })}
+                            disabled={availabilityZonesLoading || availabilityZones.length === 0}
+                          >
+                            <option value="">
+                              {availabilityZonesLoading
+                                ? 'Loading Availability Zones...'
+                                : availabilityZones.length
+                                  ? 'Select Availability Zone'
+                                  : 'No Availability Zones available'}
+                            </option>
+                            {subnet.availabilityZone &&
+                              !availabilityZones.some((zone) => zone.zoneName === subnet.availabilityZone) && (
+                                <option value={subnet.availabilityZone}>
+                                  {subnet.availabilityZone} (saved value)
+                                </option>
+                              )}
+                            {availabilityZones.map((zone) => (
+                              <option key={zone.zoneName} value={zone.zoneName}>
+                                {zone.zoneName}
+                              </option>
+                            ))}
+                          </select>
+                          {availabilityZonesError ? (
+                            <small style={{ color: '#b91c1c' }}>{availabilityZonesError}</small>
+                          ) : null}
+                        </Field>
+
+                        {subnet.subnetType === 'public' && (
+                          <Field label="Assign Public IPv4 on Launch">
+                            <select
+                              value={subnet.mapPublicIpOnLaunch ? 'yes' : 'no'}
+                              onChange={(e) => updateCreatedSubnet(index, {
+                                mapPublicIpOnLaunch: e.target.value === 'yes'
+                              })}
+                            >
+                              <option value="no">No</option>
+                              <option value="yes">Yes</option>
+                            </select>
+                          </Field>
+                        )}
+                      </div>
+
+                      <div className="existing-subnet-item-actions">
+                        <button
+                          type="button"
+                          className="existing-subnet-remove"
+                          onClick={() => updateVpc({
+                            createdSubnets: (config.createdSubnets || []).filter((_, subnetIndex) => subnetIndex !== index)
+                          })}
+                        >
+                          <span className="existing-subnet-button-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M3 6h18" />
+                              <path d="M8 6V4h8v2" />
+                              <path d="m19 6-1 14H6L5 6" />
+                              <path d="M10 11v5M14 11v5" />
+                            </svg>
+                          </span>
+                          Remove new subnet
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  className="existing-subnet-add"
+                  onClick={() => updateVpc({
+                    createdSubnets: [
+                      ...(config.createdSubnets || []),
+                      newSubnet('private')
+                    ]
+                  })}
+                >
+                  <span className="existing-subnet-button-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </span>
+                  Add new subnet
                 </button>
               </div>
 
