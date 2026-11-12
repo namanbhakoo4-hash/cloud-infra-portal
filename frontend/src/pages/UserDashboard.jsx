@@ -499,6 +499,77 @@ function validateResources(resources, instanceTypes) {
         return `${label}: enter a valid existing route table ID or leave it blank.`
       }
 
+      const existingRouteTables = Array.isArray(config.routeTables) ? config.routeTables : []
+      const routeTableIds = new Set()
+      const routeIds = new Set()
+      const associatedSubnetKeys = new Set()
+      const associatedSubnetIds = new Set(
+        config.existingSubnets.map((subnet) => String(subnet.subnetId || '').trim()).filter(Boolean)
+      )
+      const existingSubnetKeys = new Set([
+        ...config.existingSubnets.map((subnet) => subnet.resourceKey),
+        ...createdSubnetList.map((subnet) => subnet.resourceKey)
+      ])
+
+      for (const [tableIndex, table] of existingRouteTables.entries()) {
+        const tableLabel = `${label}, route table ${tableIndex + 1}`
+        if (!table.id || routeTableIds.has(table.id)) {
+          return `${tableLabel}: missing or duplicate route table identifier.`
+        }
+        routeTableIds.add(table.id)
+
+        const destinations = new Set()
+        for (const [routeIndex, route] of (table.routes || []).entries()) {
+          const routeLabel = `${tableLabel}, route ${routeIndex + 1}`
+          if (!parseCidr(route.destinationCidr)) {
+            return `${routeLabel}: enter a valid destination IPv4 CIDR.`
+          }
+          if (destinations.has(route.destinationCidr)) {
+            return `${routeLabel}: duplicate destination CIDR in this route table.`
+          }
+          destinations.add(route.destinationCidr)
+          if (!route.id || routeIds.has(route.id)) {
+            return `${routeLabel}: missing or duplicate route identifier.`
+          }
+          routeIds.add(route.id)
+
+          const targetPrefixes = {
+            virtual_private_gateway: 'vgw',
+            vpc_peering: 'pcx',
+            transit_gateway: 'tgw',
+            network_interface: 'eni'
+          }
+          const requiredPrefix = targetPrefixes[route.targetType]
+          if (!['internet_gateway', 'nat_gateway', ...Object.keys(targetPrefixes)].includes(route.targetType)) {
+            return `${routeLabel}: select a supported route target.`
+          }
+          if (requiredPrefix && !awsId(route.targetId, requiredPrefix)) {
+            return `${routeLabel}: enter a valid ${requiredPrefix.toUpperCase()} target ID.`
+          }
+        }
+
+        for (const subnetKey of table.associatedSubnetKeys || []) {
+          if (!existingSubnetKeys.has(subnetKey)) {
+            return `${tableLabel}: an associated subnet does not belong to this VPC.`
+          }
+          if (associatedSubnetKeys.has(subnetKey)) {
+            return `${tableLabel}: a subnet cannot be associated with multiple route tables.`
+          }
+          associatedSubnetKeys.add(subnetKey)
+        }
+
+        for (const [subnetIdIndex, subnetIdValue] of (table.associatedSubnetIds || []).entries()) {
+          const subnetId = String(subnetIdValue || '').trim()
+          if (!awsId(subnetId, 'subnet')) {
+            return `${tableLabel}: enter a valid AWS Subnet ID in direct entry ${subnetIdIndex + 1}.`
+          }
+          if (associatedSubnetIds.has(subnetId)) {
+            return `${tableLabel}: this Subnet ID is already configured or associated with another route table.`
+          }
+          associatedSubnetIds.add(subnetId)
+        }
+      }
+
       vpcs.set(resource.resourceKey, resource)
 
       continue
@@ -940,6 +1011,7 @@ function UserDashboard() {
   const [search, setSearch] = useState('')
 
   const [showForm, setShowForm] = useState(false)
+  const [formPage, setFormPage] = useState(1)
 
   const [submitting, setSubmitting] = useState(false)
 
@@ -1554,6 +1626,7 @@ function UserDashboard() {
   ])
 
   function resetForm() {
+    setFormPage(1)
 
     setCloudProvider('aws')
 
@@ -1616,7 +1689,8 @@ function UserDashboard() {
               routeTables: (resource.vpcConfiguration?.routeTables || []).map((table) => ({
                 ...table,
                 routes: (table.routes || []).map((route) => ({ ...route })),
-                associatedSubnetKeys: [...(table.associatedSubnetKeys || [])]
+                associatedSubnetKeys: [...(table.associatedSubnetKeys || [])],
+                associatedSubnetIds: [...(table.associatedSubnetIds || [])]
               })),
 
               subnets: (resource.vpcConfiguration?.subnets || defaults.vpcConfiguration.subnets).map((subnet) => ({
@@ -4100,7 +4174,7 @@ function UserDashboard() {
 
               className="user-primary-btn"
 
-              onClick={createNew}
+              onClick={() => setShowForm(true)}
 
             >
 
@@ -4159,6 +4233,11 @@ function UserDashboard() {
               </button>
 
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 18px', color: '#64748b', fontSize: 12 }}>
+              <span style={{ fontWeight: 700, color: formPage === 1 ? '#1d4ed8' : '#64748b' }}>1. Resource Configuration</span>
+              <span>→</span>
+              <span style={{ fontWeight: 700, color: formPage === 2 ? '#1d4ed8' : '#64748b' }}>2. Review & Submission</span>
+            </div>
 
             <form
 
@@ -4170,6 +4249,8 @@ function UserDashboard() {
 
             >
 
+              {formPage === 1 && (
+                <>
               <div className="user-form-section-title">
 
                 Project Information
@@ -4482,7 +4563,34 @@ function UserDashboard() {
                 )}
 
               </div>
+                  <div className="user-form-actions" style={{ justifyContent: 'space-between', marginTop: 8 }}>
+                    <button
+                      type="button"
+                      className="user-secondary-btn"
+                      onClick={() => {
+                        setShowForm(false)
+                        setFormPage(1)
+                        window.scrollTo({ top: 0, behavior: 'smooth' })
+                      }}
+                    >
+                      ← Back to Dashboard
+                    </button>
+                    <button
+                      type="button"
+                      className="user-primary-btn"
+                      onClick={() => {
+                        setFormPage(2)
+                        window.scrollTo({ top: 0, behavior: 'smooth' })
+                      }}
+                    >
+                      Next →
+                    </button>
+                  </div>
+                </>
+              )}
 
+              {formPage === 2 && (
+                <>
               <div className="user-form-section-title">
 
                 Business Justification
@@ -4609,6 +4717,18 @@ function UserDashboard() {
               <div className="user-form-actions">
 
                 <button
+                  type="button"
+                  className="user-secondary-btn"
+                  onClick={() => {
+                    setFormPage(1)
+                    window.scrollTo({ top: 0, behavior: 'smooth' })
+                  }}
+                  disabled={submitting}
+                >
+                  ← Back
+                </button>
+
+                <button
 
                   type="submit"
 
@@ -4659,6 +4779,8 @@ function UserDashboard() {
                 </button>
 
               </div>
+                </>
+              )}
 
             </form>
 
@@ -4666,6 +4788,7 @@ function UserDashboard() {
 
         )}
 
+        {showForm && formPage === 2 && (
         <section className="user-panel">
 
           <div className="user-panel-heading user-history-heading">
@@ -4842,7 +4965,7 @@ function UserDashboard() {
 
                 className="user-primary-btn"
 
-                onClick={createNew}
+                onClick={() => setShowForm(true)}
 
               >
 
@@ -4855,6 +4978,7 @@ function UserDashboard() {
           )}
 
         </section>
+        )}
 
       </main>
 

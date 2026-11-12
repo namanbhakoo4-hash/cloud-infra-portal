@@ -24,7 +24,8 @@ const createRouteTable = (type = 'custom') => ({
     : type === 'private'
       ? [createRoute('nat_gateway')]
       : [],
-  associatedSubnetKeys: []
+  associatedSubnetKeys: [],
+  associatedSubnetIds: []
 })
 
 const TARGET_TYPES = [
@@ -100,6 +101,24 @@ export default function RouteTableBuilder({
       : [...current, subnetKey]
 
     updateTable(table.id, { associatedSubnetKeys: next })
+  }
+
+  const updateSubnetId = (table, index, subnetId) => {
+    const current = [...(table.associatedSubnetIds || [])]
+    current[index] = subnetId
+    updateTable(table.id, { associatedSubnetIds: current })
+  }
+
+  const addSubnetId = (table) => {
+    updateTable(table.id, {
+      associatedSubnetIds: [...(table.associatedSubnetIds || []), '']
+    })
+  }
+
+  const removeSubnetId = (table, index) => {
+    updateTable(table.id, {
+      associatedSubnetIds: (table.associatedSubnetIds || []).filter((_, itemIndex) => itemIndex !== index)
+    })
   }
 
   return (
@@ -313,7 +332,7 @@ export default function RouteTableBuilder({
                 {(route.targetType === 'internet_gateway' ||
                   route.targetType === 'nat_gateway') && (
                   <p className="route-builder-auto-note">
-                    This resource will be generated automatically when
+                    The existing VPC gateway will be looked up automatically when
                     the route table is processed.
                   </p>
                 )}
@@ -331,8 +350,7 @@ export default function RouteTableBuilder({
 
             {subnets.length === 0 ? (
               <p className="route-builder-hint">
-                Configure subnets before associating them with a route
-                table.
+                No configured subnets available for checkbox selection.
               </p>
             ) : (
               <div className="route-builder-subnets">
@@ -365,6 +383,41 @@ export default function RouteTableBuilder({
                 ))}
               </div>
             )}
+
+            <div className="route-builder-existing-ids">
+              <div className="route-builder-subheading">
+                <div>
+                  <h5>Or enter existing Subnet IDs</h5>
+                  <p>Add AWS subnet IDs directly when the subnet is not listed above.</p>
+                </div>
+                <button type="button" disabled={disabled} onClick={() => addSubnetId(table)}>
+                  + Add Subnet ID
+                </button>
+              </div>
+
+              {(table.associatedSubnetIds || []).map((subnetId, subnetIdIndex) => (
+                <div className="route-builder-subnet-id-row" key={`${table.id}-subnet-id-${subnetIdIndex}`}>
+                  <label className="route-builder-target-id">
+                    Existing AWS Subnet ID {subnetIdIndex + 1}
+                    <input
+                      type="text"
+                      value={subnetId || ''}
+                      disabled={disabled}
+                      placeholder="subnet-0123456789abcdef0"
+                      onChange={(event) => updateSubnetId(table, subnetIdIndex, event.target.value)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="route-builder-remove"
+                    disabled={disabled}
+                    onClick={() => removeSubnetId(table, subnetIdIndex)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         ))}
       </div>

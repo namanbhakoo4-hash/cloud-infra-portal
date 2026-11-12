@@ -191,6 +191,53 @@ function normalizeResources(resources, fallbackRegion) {
         throw new Error(`Existing route table ID for resource ${index + 1} is invalid.`)
       }
 
+      const routeTables = Array.isArray(config.routeTables) ? config.routeTables : []
+      const routeTableIds = new Set()
+      const routeIds = new Set()
+      const associatedSubnetKeys = new Set()
+      const associatedSubnetIds = new Set()
+      const normalizedRouteTables = routeTables.map((table, tableIndex) => {
+        if (!table || typeof table !== 'object' || !table.id || routeTableIds.has(table.id)) {
+          throw new Error(`Route table ${tableIndex + 1} for resource ${index + 1} has a missing or duplicate identifier.`)
+        }
+        routeTableIds.add(table.id)
+
+        const routes = Array.isArray(table.routes) ? table.routes : []
+        routes.forEach((route, routeIndex) => {
+          if (!route.id || routeIds.has(route.id)) {
+            throw new Error(`Route ${routeIndex + 1} has a missing or duplicate identifier.`)
+          }
+          routeIds.add(route.id)
+        })
+
+        const tableSubnetKeys = Array.isArray(table.associatedSubnetKeys) ? table.associatedSubnetKeys : []
+        tableSubnetKeys.forEach((subnetKey) => {
+          if (associatedSubnetKeys.has(subnetKey)) {
+            throw new Error(`Subnet ${subnetKey} cannot be associated with multiple route tables.`)
+          }
+          associatedSubnetKeys.add(subnetKey)
+        })
+
+        const tableSubnetIds = Array.isArray(table.associatedSubnetIds) ? table.associatedSubnetIds : []
+        tableSubnetIds.forEach((subnetId) => {
+          const normalizedId = String(subnetId || '').trim()
+          if (!awsSubnetIdPattern.test(normalizedId)) {
+            throw new Error(`Route table ${tableIndex + 1} contains an invalid existing Subnet ID.`)
+          }
+          if (associatedSubnetIds.has(normalizedId)) {
+            throw new Error(`Existing Subnet ID ${normalizedId} cannot be associated with multiple route tables.`)
+          }
+          associatedSubnetIds.add(normalizedId)
+        })
+
+        return {
+          ...table,
+          routes,
+          associatedSubnetKeys: tableSubnetKeys,
+          associatedSubnetIds: tableSubnetIds.map((subnetId) => String(subnetId).trim())
+        }
+      })
+
       const subnetKeys = new Set()
       for (const subnet of existingSubnets) {
         if (subnetKeys.has(subnet.resourceKey)) {
@@ -209,6 +256,7 @@ function normalizeResources(resources, fallbackRegion) {
           mode: 'existing',
           existingVpcId,
           existingSubnets,
+          routeTables: normalizedRouteTables,
           existingRouteTableId: String(config.existingRouteTableId || '').trim()
         }
       }

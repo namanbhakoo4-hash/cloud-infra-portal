@@ -1050,6 +1050,135 @@ resource "aws_subnet" "${subnetLabel}" {
         validateId(config.existingRouteTableId, 'rtb', 'existing route table ID')
       }
 
+      const routeTables = Array.isArray(config.routeTables) ? config.routeTables : []
+      const associatedSubnetKeys = new Set()
+      const associatedSubnetIds = new Set(existingSubnets.map((subnet) => String(subnet.subnetId || '').trim()).filter(Boolean))
+      const routeTableNames = new Set()
+
+      routeTables.forEach((table, tableIndex) => {
+        const tableLabel = `${label}_existing_route_table_${tableIndex + 1}`
+        const tableName = required(String(table.name || ''), `Existing VPC route table ${tableIndex + 1} name`)
+        const safeTableName = terraformName(tableName)
+        if (routeTableNames.has(safeTableName)) {
+          throw new Error(`Duplicate route table name: ${tableName}`)
+        }
+        routeTableNames.add(safeTableName)
+
+        const routes = Array.isArray(table.routes) ? table.routes : []
+        const destinations = new Set()
+        const routeBlocks = []
+        routes.forEach((route, routeIndex) => {
+          const routeLabel = `Route table ${tableIndex + 1}, route ${routeIndex + 1}`
+          const destinationCidr = required(route.destinationCidr, `${routeLabel} destination CIDR`)
+          parseCidr(destinationCidr)
+          if (destinations.has(destinationCidr)) {
+            throw new Error(`${routeLabel} has a duplicate destination CIDR`)
+          }
+          destinations.add(destinationCidr)
+
+          const targetType = String(route.targetType || '').toLowerCase()
+          const targetProperties = {
+            internet_gateway: { attribute: 'gateway_id', expression: `data.aws_internet_gateway.${label}_existing_igw.id` },
+            nat_gateway: { attribute: 'nat_gateway_id', expression: `data.aws_nat_gateways.${label}_existing_nats.ids[0]` },
+            virtual_private_gateway: { attribute: 'gateway_id', prefix: 'vgw' },
+            vpc_peering: { attribute: 'vpc_peering_connection_id', prefix: 'pcx' },
+            transit_gateway: { attribute: 'transit_gateway_id', prefix: 'tgw' },
+            network_interface: { attribute: 'network_interface_id', prefix: 'eni' }
+          }
+          const target = targetProperties[targetType]
+          if (!target) {
+            throw new Error(`${routeLabel} has an unsupported target type`)
+          }
+
+          let targetExpression = target.expression
+          if (target.prefix) {
+            targetExpression = hcl(validateId(
+              required(route.targetId, `${routeLabel} target ID`),
+              target.prefix,
+              `${targetType} target ID`
+            ))
+          }
+          if (targetType === 'internet_gateway') {
+            const dataLabel = `${label}_existing_igw`
+            if (!blocks.some((block) => block.includes(`data \"aws_internet_gateway\" \"${dataLabel}\"`))) {
+              blocks.push(`
+data \"aws_internet_gateway\" \"${dataLabel}\" {
+  provider = aws.${provider}
+  filter {
+    name   = \"attachment.vpc-id\"
+    values = [${hcl(existingVpcId)}]
+  }
+}
+`)
+            }
+          }
+          if (targetType === 'nat_gateway') {
+            const dataLabel = `${label}_existing_nats`
+            if (!blocks.some((block) => block.includes(`data \"aws_nat_gateways\" \"${dataLabel}\"`))) {
+              blocks.push(`
+data \"aws_nat_gateways\" \"${dataLabel}\" {
+  provider = aws.${provider}
+  filter {
+    name   = \"vpc-id\"
+    values = [${hcl(existingVpcId)}]
+  }
+}
+`)
+            }
+          }
+          routeBlocks.push(`  route {
+    cidr_block = ${hcl(destinationCidr)}
+    ${target.attribute} = ${targetExpression}
+  }`)
+        })
+
+        blocks.push(`
+resource \"aws_route_table\" \"${tableLabel}\" {
+  provider = aws.${provider}
+  vpc_id   = ${hcl(existingVpcId)}
+${routeBlocks.join('\n')}
+  tags = {
+    Name = ${hcl(tableName)}
+  }
+}
+`)
+        addPlanned('aws_route_table', tableLabel, { vpcSource: 'existing', routeCount: routes.length })
+
+        const selectedSubnetRefs = []
+        for (const subnetKey of table.associatedSubnetKeys || []) {
+          if (associatedSubnetKeys.has(subnetKey)) {
+            throw new Error(`Subnet ${subnetKey} cannot be associated with multiple route tables`)
+          }
+          associatedSubnetKeys.add(subnetKey)
+          const subnet = subnetReferences.get(subnetKey)
+          if (!subnet || subnet.vpcKey !== key) {
+            throw new Error(`Associated subnet ${subnetKey} does not belong to existing VPC ${existingVpcId}`)
+          }
+          selectedSubnetRefs.push({ ref: subnet.subnetRef, suffix: `key_${selectedSubnetRefs.length + 1}` })
+        }
+
+        for (const subnetIdValue of table.associatedSubnetIds || []) {
+          const subnetId = validateId(required(String(subnetIdValue || ''), 'Existing subnet ID'), 'subnet', 'existing subnet ID')
+          if (associatedSubnetIds.has(subnetId)) {
+            throw new Error(`Existing subnet ${subnetId} is already configured or associated with another route table`)
+          }
+          associatedSubnetIds.add(subnetId)
+          selectedSubnetRefs.push({ ref: hcl(subnetId), suffix: `id_${selectedSubnetRefs.length + 1}` })
+        }
+
+        selectedSubnetRefs.forEach((subnet, associationIndex) => {
+          const associationLabel = `${tableLabel}_association_${associationIndex + 1}`
+          blocks.push(`
+resource \"aws_route_table_association\" \"${associationLabel}\" {
+  provider       = aws.${provider}
+  subnet_id      = ${subnet.ref}
+  route_table_id = aws_route_table.${tableLabel}.id
+}
+`)
+          addPlanned('aws_route_table_association', associationLabel, { vpcSource: 'existing' })
+        })
+      })
+
       return
 
 
