@@ -123,7 +123,7 @@ const newVpc = () => ({
 
     existingVpcCidr: '',
 
-    existingSubnets: [{ resourceKey: newKey(), subnetId: '', subnetType: 'private', ipv4Cidr: '' }],
+    existingSubnets: [],
 
     createdSubnets: [],
 
@@ -385,10 +385,6 @@ function validateResources(resources, instanceTypes) {
 
       if (!awsId(config.existingVpcId, 'vpc')) {
         return `${label}: enter a valid existing VPC ID.`
-      }
-
-      if (!Array.isArray(config.existingSubnets) || config.existingSubnets.length === 0) {
-        return `${label}: add at least one existing subnet ID.`
       }
 
       const createdSubnetList = Array.isArray(config.createdSubnets)
@@ -1058,6 +1054,7 @@ function UserDashboard() {
   const isEc2 = active?.service === 'EC2'
 
   const isVpc = active?.service === 'VPC'
+  const isRouteTable = active?.service === 'ROUTE_TABLE'
 
   const vpcOptions = resources.filter(
 
@@ -1076,6 +1073,19 @@ function UserDashboard() {
       active?.ec2Configuration?.network?.vpcResourceKey
 
   )
+
+  const selectedRouteTableVpc = vpcOptions.find(
+    (item) => item.resourceKey === active?.routeTableVpcResourceKey
+  )
+
+  const routeTableSubnets = selectedRouteTableVpc
+    ? selectedRouteTableVpc.vpcConfiguration?.mode === 'existing'
+      ? [
+          ...(selectedRouteTableVpc.vpcConfiguration.existingSubnets || []),
+          ...(selectedRouteTableVpc.vpcConfiguration.createdSubnets || [])
+        ]
+      : selectedRouteTableVpc.vpcConfiguration?.subnets || []
+    : []
 
   const activeVpcRegion = isVpc
     ? active?.region || ''
@@ -1156,7 +1166,7 @@ function UserDashboard() {
 
   }
 
-  function updateRouteTables(routeTables) {
+  function updateRouteTablesForVpc(vpcResourceKey, routeTables) {
     const hasInternetGatewayRoute = routeTables.some((table) =>
       (table.routes || []).some((route) => route.targetType === 'internet_gateway')
     )
@@ -1164,11 +1174,21 @@ function UserDashboard() {
       (table.routes || []).some((route) => route.targetType === 'nat_gateway')
     )
 
-    updateVpc({
-      routeTables,
-      createInternetGateway: hasInternetGatewayRoute,
-      natGatewayMode: hasNatGatewayRoute ? 'single' : 'none'
-    })
+    setResources((previous) =>
+      previous.map((item) =>
+        item.resourceKey === vpcResourceKey && item.service === 'VPC'
+          ? {
+              ...item,
+              vpcConfiguration: {
+                ...item.vpcConfiguration,
+                routeTables,
+                createInternetGateway: hasInternetGatewayRoute,
+                natGatewayMode: hasNatGatewayRoute ? 'single' : 'none'
+              }
+            }
+          : item
+      )
+    )
   }
 
   function updateEc2(changes) {
@@ -1247,27 +1267,24 @@ function UserDashboard() {
   }
 
   function selectService(service) {
-
     const resourceKey = active.resourceKey
 
     const next = service === 'VPC'
-
       ? newVpc()
-
       : service === 'EC2'
-
         ? newEc2()
-
-        : newBlankResource()
+        : service === 'ROUTE_TABLE'
+          ? {
+              ...newBlankResource(),
+              service: 'ROUTE_TABLE',
+              routeTableVpcResourceKey: vpcOptions[0]?.resourceKey || ''
+            }
+          : newBlankResource()
 
     updateActive({
-
       ...next,
-
       resourceKey
-
     })
-
   }
 
   function updatePreference(field, value) {
@@ -2044,103 +2061,6 @@ function UserDashboard() {
                 />
                 <small>Enter the IPv4 CIDR assigned to the existing VPC so new subnet ranges can be validated.</small>
               </Field>
-              <Field label="Existing Route Table ID (Optional)">
-                <input
-                  value={config.existingRouteTableId || ''}
-                  onChange={(e) => updateVpc({ existingRouteTableId: e.target.value })}
-                  placeholder="rtb-0123456789abcdef0"
-                />
-              </Field>
-              <div className="user-form-field existing-subnets-section" style={{ gridColumn: '1 / -1' }}>
-                <label>Existing Subnets *</label>
-
-                <div className="existing-subnets-list">
-                  {(config.existingSubnets || []).map((subnet, index) => (
-                    <div className="existing-subnet-item" key={subnet.resourceKey || index}>
-                      <div className="user-form-grid">
-                        <Field label={`Subnet ${index + 1} ID *`}>
-                          <input
-                            value={subnet.subnetId || ''}
-                            onChange={(e) => updateVpc({
-                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
-                                itemIndex === index ? { ...item, subnetId: e.target.value } : item
-                              )
-                            })}
-                            placeholder="subnet-0123456789abcdef0"
-                          />
-                        </Field>
-
-                        <Field label={`Subnet ${index + 1} CIDR * (Required when creating new subnets)`}>
-                          <input
-                            value={subnet.ipv4Cidr || ''}
-                            onChange={(e) => updateVpc({
-                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
-                                itemIndex === index ? { ...item, ipv4Cidr: e.target.value } : item
-                              )
-                            })}
-                            placeholder="10.0.1.0/24"
-                          />
-                        </Field>
-
-                        <Field label="Subnet Type">
-                          <select
-                            value={subnet.subnetType || 'private'}
-                            onChange={(e) => updateVpc({
-                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
-                                itemIndex === index ? { ...item, subnetType: e.target.value } : item
-                              )
-                            })}
-                          >
-                            <option value="private">Private</option>
-                            <option value="public">Public</option>
-                          </select>
-                        </Field>
-                      </div>
-
-                      <div className="existing-subnet-item-actions">
-                        <button
-                          type="button"
-                          className="existing-subnet-remove"
-                          onClick={() => updateVpc({
-                            existingSubnets: (config.existingSubnets || []).filter(
-                              (_, itemIndex) => itemIndex !== index
-                            )
-                          })}
-                        >
-                          <span className="existing-subnet-button-icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M3 6h18" />
-                              <path d="M8 6V4h8v2" />
-                              <path d="m19 6-1 14H6L5 6" />
-                              <path d="M10 11v5M14 11v5" />
-                            </svg>
-                          </span>
-                          Remove subnet
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <button
-                  type="button"
-                  className="existing-subnet-add"
-                  onClick={() => updateVpc({
-                    existingSubnets: [
-                      ...(config.existingSubnets || []),
-                      { resourceKey: newKey(), subnetId: '', subnetType: 'private', ipv4Cidr: '' }
-                    ]
-                  })}
-                >
-                  <span className="existing-subnet-button-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                      <path d="M12 5v14M5 12h14" />
-                    </svg>
-                  </span>
-                  Add existing subnet
-                </button>
-              </div>
-
               <div className="user-form-field existing-subnets-section" style={{ gridColumn: '1 / -1' }}>
                 <label>Create New Subnets Inside This VPC</label>
                 <p>
@@ -2267,13 +2187,6 @@ function UserDashboard() {
                 </button>
               </div>
 
-              <div style={{ gridColumn: '1 / -1' }}>
-                <RouteTableBuilder
-                  routeTables={config.routeTables || []}
-                  subnets={config.existingSubnets || []}
-                  onChange={updateRouteTables}
-                />
-              </div>
             </>
 
           ) : (
@@ -2836,6 +2749,68 @@ function UserDashboard() {
 
     )
 
+  }
+
+  function renderRouteTableForm() {
+    const selectedVpcConfig = selectedRouteTableVpc?.vpcConfiguration || {}
+
+    return (
+      <>
+        <div className="user-form-section-title">
+          Route Table Configuration
+        </div>
+        <div className="user-form-grid">
+          <Field label="Select VPC *">
+            <select
+              value={active.routeTableVpcResourceKey || ''}
+              onChange={(e) => updateActive({ routeTableVpcResourceKey: e.target.value })}
+              required
+            >
+              <option value="">Select VPC</option>
+              {vpcOptions.map((vpc) => (
+                <option key={vpc.resourceKey} value={vpc.resourceKey}>
+                  {vpc.vpcConfiguration?.name ||
+                    vpc.vpcConfiguration?.existingVpcId ||
+                    vpc.resourceName ||
+                    vpc.resourceKey}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        {!vpcOptions.length ? (
+          <p style={{ color: '#64748b', marginBottom: 0 }}>
+            Add a VPC resource first, then return here to configure its route tables.
+          </p>
+        ) : !selectedRouteTableVpc ? (
+          <p style={{ color: '#64748b', marginBottom: 0 }}>
+            Select a VPC to view and configure its route tables.
+          </p>
+        ) : (
+          <RouteTableBuilder
+            routeTables={selectedVpcConfig.routeTables || []}
+            subnets={routeTableSubnets}
+            onChange={(routeTables) =>
+              updateRouteTablesForVpc(selectedRouteTableVpc.resourceKey, routeTables)
+            }
+          />
+        )}
+        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="user-primary-btn"
+            onClick={() => {
+              setAddedResourceKeys((previous) =>
+                previous.includes(active.resourceKey) ? previous : [...previous, active.resourceKey]
+              )
+              setActiveIndex(-1)
+            }}
+          >
+            Save & Collapse Resource
+          </button>
+        </div>
+      </>
+    )
   }
 
   function renderEc2Form() {
@@ -4377,14 +4352,20 @@ function UserDashboard() {
                     ? 'Amazon VPC'
                     : item.service === 'EC2'
                       ? 'Amazon EC2'
-                      : 'New resource'
+                      : item.service === 'ROUTE_TABLE'
+                        ? 'Route Table Configuration'
+                        : 'New resource'
                   const resourceName = item.service === 'VPC'
                     ? (vpcConfig.mode === 'existing'
                       ? (vpcConfig.existingVpcId || 'Existing VPC')
                       : (vpcConfig.name || 'Unnamed VPC'))
                     : item.service === 'EC2'
                       ? (item.resourceName || 'EC2 resource')
-                      : 'Choose a cloud service'
+                      : item.service === 'ROUTE_TABLE'
+                        ? (vpcOptions.find((vpc) => vpc.resourceKey === item.routeTableVpcResourceKey)?.vpcConfiguration?.name ||
+                          vpcOptions.find((vpc) => vpc.resourceKey === item.routeTableVpcResourceKey)?.vpcConfiguration?.existingVpcId ||
+                          'Select a VPC')
+                        : 'Choose a cloud service'
                   const resourceDetails = item.service === 'VPC'
                     ? [
                         vpcConfig.mode === 'existing'
@@ -4399,7 +4380,11 @@ function UserDashboard() {
                           item.instanceType || 'Instance type not selected',
                           `${item.quantity || 1} instance(s) · ${item.storage || 20} GiB`
                         ]
-                      : ['Configuration not started']
+                      : item.service === 'ROUTE_TABLE'
+                        ? [
+                            `${(vpcOptions.find((vpc) => vpc.resourceKey === item.routeTableVpcResourceKey)?.vpcConfiguration?.routeTables || []).length} route table(s)`
+                          ]
+                        : ['Configuration not started']
 
                   return (
                     <div
@@ -4422,11 +4407,11 @@ function UserDashboard() {
                             display: 'grid',
                             placeItems: 'center',
                             borderRadius: 10,
-                            background: item.service === 'VPC' ? '#eff6ff' : item.service === 'EC2' ? '#f0fdf4' : '#f1f5f9',
-                            color: item.service === 'VPC' ? '#1d4ed8' : item.service === 'EC2' ? '#15803d' : '#64748b',
+                            background: item.service === 'VPC' ? '#eff6ff' : item.service === 'EC2' ? '#f0fdf4' : item.service === 'ROUTE_TABLE' ? '#f5f3ff' : '#f1f5f9',
+                            color: item.service === 'VPC' ? '#1d4ed8' : item.service === 'EC2' ? '#15803d' : item.service === 'ROUTE_TABLE' ? '#6d28d9' : '#64748b',
                             fontWeight: 700
                           }}>
-                            {item.service === 'VPC' ? 'V' : item.service === 'EC2' ? 'E' : index + 1}
+                            {item.service === 'VPC' ? 'V' : item.service === 'EC2' ? 'E' : item.service === 'ROUTE_TABLE' ? 'R' : index + 1}
                           </div>
                           <div style={{ minWidth: 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
@@ -4475,6 +4460,7 @@ function UserDashboard() {
                                 <option value="">Select Cloud Service</option>
                                 <option value="VPC" disabled={cloudProvider !== 'aws'}>Amazon VPC</option>
                                 <option value="EC2" disabled={cloudProvider !== 'aws'}>Amazon EC2</option>
+                                <option value="ROUTE_TABLE" disabled={cloudProvider !== 'aws'}>Route Table Configuration</option>
                                 <option disabled>Amazon EBS (Coming Soon)</option>
                                 <option disabled>Amazon S3 (Coming Soon)</option>
                                 <option disabled>Amazon RDS (Coming Soon)</option>
@@ -4483,6 +4469,7 @@ function UserDashboard() {
                           </div>
                           {isVpc && renderVpcForm()}
                           {isEc2 && renderEc2Form()}
+                          {isRouteTable && renderRouteTableForm()}
                           {!item.service && <p style={{ color: '#64748b', marginBottom: 0 }}>Select a service to configure this resource.</p>}
                         </div>
                       )}
