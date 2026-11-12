@@ -536,7 +536,16 @@ async function getPricingRows(bom) {
 }
 
 function buildCsv(rows) {
-  const headers = ['Section', 'Resource', 'Detail', 'Value']
+  const headers = [
+    'Section',
+    'Resource',
+    'Region',
+    'Service',
+    'Component / Detail',
+    'Value',
+    'Currency',
+    'Status'
+  ]
 
   const escape = (value) => {
     let text = displayValue(value)
@@ -552,6 +561,43 @@ function buildCsv(rows) {
   ]
     .map((row) => row.map(escape).join(','))
     .join('\r\n') + '\r\n'
+}
+
+function getCsvConfigurationSummary(resource) {
+  const rows = []
+  flattenConfiguration(resource, 'Resource', rows)
+
+  return rows
+    .filter((row) => row['Configuration Path'] !== 'Resource.service')
+    .map((row) => `${row['Configuration Path'].replace(/^Resource\.?/, '')}: ${row['Saved Value']}`)
+    .join('; ')
+}
+
+function getCsvResourceName(resource, index) {
+  return getResourceName(resource, index)
+}
+
+function getCsvResourceIndex(pricingRow, resources) {
+  if (Number.isInteger(pricingRow.resourceIndex)) {
+    return pricingRow.resourceIndex
+  }
+
+  const numberedResource = String(pricingRow.Resource || '').match(/^Resource\s+(\d+)$/i)
+  if (numberedResource) return Number(numberedResource[1]) - 1
+
+  return resources.findIndex((resource, index) =>
+    getCsvResourceName(resource, index) === pricingRow.Resource
+  )
+}
+
+function getNumericCost(value) {
+  if (value === undefined || value === null || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function formatCost(value) {
+  return value === null ? '' : Number(value.toFixed(2))
 }
 
 function addTitle(worksheet, title, subtitle, columnCount) {
@@ -804,256 +850,662 @@ async function buildBomCsv(bom) {
   if (!bom) throw new Error('A BOM record is required for CSV export')
 
   const data = plainBom(bom)
-  const rows = []
-
-  for (const row of getSummaryRows(data)) {
-    rows.push({
-      Section: 'Request Summary',
-      Resource: '',
-      Detail: row.Detail,
-      Value: row.Value
-    })
-  }
-
-  const { vpcRows, ec2Rows, storageRows } = getResourceRows(data)
-
-  for (const row of [...vpcRows, ...ec2Rows, ...storageRows]) {
-    rows.push({
-      Section: row.Section,
-      Resource: row.Resource,
-      Detail: row.Setting,
-      Value: row.Value
-    })
-  }
-
+  const resources = Array.isArray(data.resources) ? data.resources : []
   const pricingRows = await getPricingRows(data)
+  const currency = data.estimatedCost?.currency ||
+    pricingRows.find((row) => row.Currency)?.Currency || 'USD'
+  const monthlyHours = Number(data.estimatedCost?.monthlyHours || 730)
+  const generatedAt = new Date().toISOString()
+  const headers = [
+    'Group hierarchy',
+    'Region',
+    'Description',
+    'Service',
+    'Upfront cost',
+    'Monthly cost',
+    'First 12 months',
+    'Currency',
+    'Pricing status',
+    'Configuration summary'
+  ]
+  const rows = []
+  const add = (values = {}) => {
+    rows.push(Object.fromEntries(headers.map((header) => [header, values[header] ?? ''])))
+  }
+  const numericCost = (value) => {
+    if (value === undefined || value === null || value === '') return null
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  const money = (value) => value === null ? 'Not available' : Number(value.toFixed(2))
+  const resourceName = (resource, index) => getResourceName(resource || {}, index)
+  const getSubnetList = (vpc) => vpc.mode === 'existing'
+    ? [...(vpc.existingSubnets || []), ...(vpc.createdSubnets || [])]
+    : (vpc.subnets || [])
+  const getSecurityRules = (securityGroup) => {
+    const rules = []
+    for (const [direction, entries] of [
+      ['Inbound', securityGroup?.ingressRules],
+      ['Outbound', securityGroup?.egressRules]
+    ]) {
+      ;(Array.isArray(entries) ? entries : []).forEach((rule) => {
+        const protocol = String(rule.protocol || 'All').toLowerCase() === '-1'
+          ? 'All protocols'
+          : String(rule.protocol || 'All').toUpperCase()
+        const from = rule.fromPort
+        const to = rule.toPort
+        const allPorts = (from === undefined || from === null || from === -1 || from === '-1') &&
+          (to === undefined || to === null || to === -1 || to === '-1')
+        const port = allPorts
+          ? 'All ports'
+          : from === to || to === undefined || to === null
+            ? `Port ${from}`
+            : `Ports ${from}-${to}`
+        const destination = rule.cidr || rule.source || rule.destination || 'Not specified'
+        rules.push(`${direction}: ${protocol}; ${port}; ${destination}${rule.description ? `; ${rule.description}` : ''}`)
+      })
+    }
+    return rules
+  }
+  const configurationFor = (resource, index) => {
+    const service = String(resource.service || '').toUpperCase()
+    const ec2 = resource.ec2Configuration || {}
+    const network = ec2.network || {}
+    const vpc = resource.vpcConfiguration || {}
+    const items = []
+    const push = (label, value) => {
+      if (hasValue(value)) items.push(`${label}: ${displayValue(value)}`)
+    }
 
-  for (const row of pricingRows) {
-    rows.push({
-      Section: 'Pricing',
-      Resource: row.Resource,
-      Detail: `${row.Component} - ${row.Status}`,
-      Value: [
-        row.Region,
-        row.Currency,
-        row.UnitRate,
-        row.Unit,
-        row['Monthly Hours'],
-        row.Quantity,
-        row['Monthly Cost'],
-        row.Details
-      ].filter(hasValue).join(' | ')
-    })
+    if (service === 'EC2') {
+      push('Instance type', resource.instanceType || ec2.instanceType)
+      push('vCPU', resource.cpu ?? ec2.cpu)
+      push('Memory', resource.ram ?? ec2.ram)
+      push('Operating system', resource.operatingSystem || ec2.operatingSystem)
+      push('Instance quantity', resource.quantity ?? ec2.quantity ?? 1)
+      const rootSize = resource.storage ?? ec2.storage
+      if (hasValue(rootSize)) push('Root volume', `${rootSize} GiB ${resource.storageType || ec2.storageType || ''}`.trim())
+      const vpcResource = resources.find((candidate) =>
+        String(candidate.service || '').toUpperCase() === 'VPC' &&
+        candidate.resourceKey && candidate.resourceKey === network.vpcResourceKey
+      )
+      push('VPC', vpcResource ? getResourceName(vpcResource, resources.indexOf(vpcResource)) : (network.vpcId || network.vpcSource))
+      const subnetResource = resources.find((candidate) =>
+        String(candidate.service || '').toUpperCase() === 'VPC' &&
+        getSubnetList(candidate.vpcConfiguration || {}).some((subnet) =>
+          subnet.resourceKey === network.subnetResourceKey || subnet.subnetId === network.subnetId
+        )
+      )
+      const matchedSubnet = subnetResource && getSubnetList(subnetResource.vpcConfiguration || {}).find((subnet) =>
+        subnet.resourceKey === network.subnetResourceKey || subnet.subnetId === network.subnetId
+      )
+      const matchedSubnetIndex = matchedSubnet
+        ? getSubnetList(subnetResource.vpcConfiguration || {}).indexOf(matchedSubnet)
+        : -1
+      const matchedSubnetLabel = matchedSubnet
+        ? `${matchedSubnet.name || `Subnet ${matchedSubnetIndex + 1}`}${matchedSubnet.subnetType ? ` (${matchedSubnet.subnetType})` : ''}`
+        : ''
+      push('Subnet', matchedSubnetLabel || (network.subnetId ? `Subnet ID ${network.subnetId}` : (network.subnetResourceKey ? 'Selected subnet (name not available in saved configuration)' : '')))
+      push('Public IP assignment', network.associatePublicIpAddress)
+      const securityGroup = network.securityGroup || {}
+      push('Security group', securityGroup.name || (Array.isArray(network.securityGroupIds) ? network.securityGroupIds.join(', ') : network.securityGroupIds))
+      const securityRules = getSecurityRules(securityGroup)
+      if (securityRules.length) items.push(`Security rules: ${securityRules.join(' | ')}`)
+      ;(Array.isArray(resource.ebsVolumes) ? resource.ebsVolumes : []).forEach((volume, volumeIndex) => {
+        items.push(`Additional volume ${volumeIndex + 1}: ${volume.name || volume.deviceName || 'EBS volume'}; ${volume.sizeGiB ?? 'Size not specified'} GiB; ${volume.volumeType || 'Type not specified'}${hasValue(volume.iops) ? `; ${volume.iops} IOPS` : ''}${hasValue(volume.throughput) ? `; ${volume.throughput} MiB/s` : ''}`)
+      })
+    } else if (service === 'VPC') {
+      push('VPC mode', vpc.mode === 'existing' ? 'Existing VPC' : 'New VPC')
+      push('VPC CIDR', vpc.ipv4Cidr || vpc.existingVpcCidr)
+      push('Existing VPC ID', vpc.existingVpcId)
+      push('DNS resolution', vpc.enableDnsSupport)
+      push('DNS hostnames', vpc.enableDnsHostnames)
+      push('Internet Gateway', vpc.createInternetGateway)
+      push('NAT Gateway configuration', vpc.natGatewayMode)
+      push('IPv6 configuration', vpc.ipv6Mode)
+      const subnets = getSubnetList(vpc)
+      subnets.forEach((subnet, subnetIndex) => {
+        items.push(`Subnet ${subnetIndex + 1}: ${subnet.name || `Subnet ${subnetIndex + 1}`}; ${String(subnet.subnetType || 'type not specified').toLowerCase()}; CIDR ${subnet.ipv4Cidr || subnet.cidr || 'not specified'}${subnet.availabilityZone ? `; ${subnet.availabilityZone}` : ''}`)
+      })
+      ;(Array.isArray(vpc.routeTables) ? vpc.routeTables : []).forEach((routeTable, routeIndex) => {
+        items.push(`Route table ${routeIndex + 1}: ${routeTable.name || 'Route table'}${routeTable.routes?.length ? `; ${routeTable.routes.map((route) => `${route.destination || route.cidr || 'Destination'} via ${route.target || route.gatewayId || 'target not specified'}`).join(', ')}` : ''}`)
+      })
+    } else {
+      push('Quantity', resource.quantity)
+      push('Configuration', resource.configuration)
+    }
+    return items.join(' | ') || 'No additional configuration details were saved.'
   }
 
-  return buildCsv(rows)
-}
+  const monthlyCosts = pricingRows.map((row) => numericCost(row['Monthly Cost'])).filter((value) => value !== null)
+  const computedMonthly = monthlyCosts.length
+    ? Number(monthlyCosts.reduce((sum, value) => sum + value, 0).toFixed(2))
+    : null
+  const savedMonthly = numericCost(data.estimatedCost?.monthlyTotal)
+  const monthlyTotal = savedMonthly ?? computedMonthly
+  const upfrontCosts = pricingRows.map((row) => numericCost(row.UpfrontCost ?? row.upfrontCost ?? row['Upfront Cost'])).filter((value) => value !== null)
+  const upfrontTotal = upfrontCosts.length
+    ? Number(upfrontCosts.reduce((sum, value) => sum + value, 0).toFixed(2))
+    : null
+  const pricedRows = pricingRows.filter((row) => numericCost(row['Monthly Cost']) !== null)
+  const unavailableRows = pricingRows.filter((row) => String(row.Status || '').toLowerCase() === 'unavailable')
+  const pricedResourceIndexes = new Set(pricingRows.map((row) => getCsvResourceIndex(row, resources)).filter((index) => index >= 0))
+  const hasUnpricedConfiguredResources = resources.some((resource, index) =>
+    ['VPC', 'EC2'].includes(String(resource.service || '').toUpperCase()) && !pricedResourceIndexes.has(index)
+  )
+  const pricingStatus = !pricingRows.length || pricedRows.length === 0
+    ? 'Pricing unavailable'
+    : unavailableRows.length > 0 || pricedRows.length < pricingRows.length || hasUnpricedConfiguredResources
+      ? 'Partially priced'
+      : 'Calculated'
+  const firstYearTotal = monthlyTotal === null ? null : Number((monthlyTotal * 12 + (upfrontTotal || 0)).toFixed(2))
 
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Estimate name', 'Configuration summary': data.projectName || data.ticketId || 'Cloud infrastructure estimate' })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Estimate ID', 'Configuration summary': data.ticketId || '' })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Project', 'Configuration summary': data.projectName || '' })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Environment', 'Configuration summary': data.environment || '' })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Cloud provider', 'Configuration summary': data.cloudProvider || 'AWS' })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Region', 'Configuration summary': data.region || '' })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Generated on', 'Configuration summary': generatedAt })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Upfront cost', 'Upfront cost': upfrontTotal === null ? 'Not available in current pricing data' : money(upfrontTotal), Currency: currency })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Monthly cost', 'Monthly cost': money(monthlyTotal), Currency: currency })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'First 12 months', 'First 12 months': money(firstYearTotal), Currency: currency })
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Pricing status', 'Pricing status': pricingStatus })
+  if (pricingStatus === 'Partially priced') {
+    add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Pricing coverage', 'Configuration summary': 'Some configured resources or cost components do not have supported pricing data. Unpriced items are excluded from the displayed total and should not be interpreted as free.' })
+  }
+  add({ 'Group hierarchy': 'ESTIMATE SUMMARY', Description: 'Usage assumption', 'Configuration summary': `${monthlyHours} hours per month where hourly pricing applies` })
+
+  add({ 'Group hierarchy': 'DETAILED ESTIMATE', Description: 'Resource cost breakdown', 'Configuration summary': 'Each row represents one priced component. Configuration details are listed once in the Configuration Summary section below.' })
+  const resourcesWithPricing = new Set()
+  pricingRows.forEach((pricingRow) => {
+    const index = getCsvResourceIndex(pricingRow, resources)
+    const resource = index >= 0 ? resources[index] : null
+    if (index >= 0) resourcesWithPricing.add(index)
+    const componentName = String(pricingRow.Component || 'Service component')
+    const resourceService = String(resource?.service || pricingRow.Service || '').toUpperCase()
+    const service = /storage|volume|disk/i.test(componentName) ? 'EBS' : resourceService
+    const monthly = numericCost(pricingRow['Monthly Cost'])
+    const upfront = numericCost(pricingRow.UpfrontCost ?? pricingRow.upfrontCost ?? pricingRow['Upfront Cost'])
+    const first12 = monthly === null ? null : Number((monthly * 12 + (upfront || 0)).toFixed(2))
+    const component = componentName
+    const description = `${resource ? resourceName(resource, index) : (pricingRow.Resource || 'Cloud resource')} - ${component}`
+    const unitRate = numericCost(pricingRow.UnitRate)
+    const assumptions = [
+      pricingRow.Quantity ? `Quantity: ${pricingRow.Quantity}` : '',
+      unitRate !== null ? `Unit rate: ${unitRate} per ${pricingRow.Unit || 'unit'}` : '',
+      pricingRow['Monthly Hours'] ? `Usage: ${pricingRow['Monthly Hours']} hours/month` : '',
+      pricingRow.Details || ''
+    ].filter(Boolean).join('; ')
+    add({
+      'Group hierarchy': service === 'EC2' ? 'Compute' : service === 'VPC' ? 'Networking' : service === 'EBS' ? 'Storage' : (service || 'Cloud services'),
+      Region: resource?.region || pricingRow.Region || data.region || '',
+      Description: description,
+      Service: service,
+      'Upfront cost': upfront === null ? 'Not included in available pricing' : money(upfront),
+      'Monthly cost': money(monthly),
+      'First 12 months': money(first12),
+      Currency: pricingRow.Currency || currency,
+      'Pricing status': pricingRow.Status || (monthly === null ? 'Unavailable' : 'Available'),
+      'Configuration summary': assumptions
+    })
+  })
+
+  add({ 'Group hierarchy': 'CONFIGURATION SUMMARY', Description: 'Resource configurations', 'Configuration summary': 'The following entries describe each resource once. Internal resource keys are intentionally omitted.' })
+  resources.forEach((resource, index) => {
+    const service = String(resource.service || '').toUpperCase()
+    const group = service === 'EC2' ? 'Compute' : service === 'VPC' ? 'Networking' : service || 'Cloud resources'
+    add({
+      'Group hierarchy': group,
+      Region: resource.region || data.region || '',
+      Description: service === 'VPC' && resource.vpcConfiguration?.mode === 'existing' && resource.vpcConfiguration?.existingVpcId
+        ? `Existing VPC - ${resource.vpcConfiguration.existingVpcId}`
+        : resourceName(resource, index),
+      Service: service,
+      'Pricing status': resourcesWithPricing.has(index) ? 'See detailed estimate' : 'Configuration only - no supported price available',
+      'Configuration summary': configurationFor(resource, index)
+    })
+  })
+
+  add({ 'Group hierarchy': 'ACKNOWLEDGEMENT', Description: 'Pricing disclaimer', 'Configuration summary': 'This estimate is for planning purposes. Actual cloud charges may vary based on usage, selected configuration, region, pricing changes, discounts, taxes and other applicable fees. Only costs supported by the portal pricing data are included. A resource marked as not priced should not be interpreted as free.' })
+
+  const escape = (value) => {
+    let text = displayValue(value)
+    if (/^[=+@-]/.test(text)) text = `'${text}`
+    return `"${text.replace(/"/g, '""')}"`
+  }
+
+  return [headers, ...rows.map((row) => headers.map((header) => row[header] ?? ''))]
+    .map((row) => row.map(escape).join(','))
+    .join('\r\n') + '\r\n'
+}
 async function buildBomXlsx(bom) {
   if (!bom) throw new Error('A BOM record is required for Excel export')
 
   const data = plainBom(bom)
+  const resources = Array.isArray(data.resources) ? data.resources : []
+  const pricingRows = await getPricingRows(data)
   const workbook = new ExcelJS.Workbook()
 
   workbook.creator = 'Cloud Infrastructure Portal'
-  workbook.subject = 'Detailed Infrastructure Bill of Materials'
-  workbook.title = `Infrastructure Request ${data.ticketId || ''}`
+  workbook.subject = 'AWS Pricing Calculator-style estimate'
+  workbook.title = `My Estimate - ${data.ticketId || data.projectName || 'Cloud Infrastructure'}`
   workbook.company = 'Cloud Infrastructure Portal'
   workbook.created = new Date()
   workbook.modified = new Date()
-  workbook.description = 'Detailed infrastructure configuration report'
+  workbook.description = 'Single-sheet cloud cost estimate following the AWS Pricing Calculator export flow'
 
-  createOverviewSheet(workbook, data)
-
-  const inventoryColumns = [
-    { header: 'Resource Number', key: 'Resource Number' },
-    { header: 'Resource Name', key: 'Resource Name' },
-    { header: 'Resource Type', key: 'Resource Type' },
-    { header: 'Cloud Provider', key: 'Cloud Provider' },
-    { header: 'Region', key: 'Region' },
-    { header: 'Resource Key', key: 'Resource Key' },
-    { header: 'Instance Type', key: 'Instance Type' },
-    { header: 'CPU', key: 'CPU' },
-    { header: 'RAM', key: 'RAM' },
-    { header: 'Quantity', key: 'Quantity' },
-    { header: 'Operating System', key: 'Operating System' },
-    { header: 'Billing Model', key: 'Billing Model' },
-    { header: 'Resource Status', key: 'Resource Status' }
-  ]
-
-  createTableSheet(
-    workbook,
-    'Resource Inventory',
-    'RESOURCE INVENTORY',
-    'All infrastructure resources included in this request',
-    inventoryColumns,
-    getResourceInventoryRows(data)
-  )
-
-  const {
-    vpcRows,
-    ec2Rows,
-    storageRows,
-    subnetRows,
-    securityRows
-  } = getResourceRows(data)
-
-  const detailColumns = [
-    { header: 'Resource', key: 'Resource' },
-    { header: 'Configuration Area', key: 'Section' },
-    { header: 'Setting', key: 'Setting' },
-    { header: 'Selected Value', key: 'Value' }
-  ]
-
-  createTableSheet(
-    workbook,
-    'VPC & Networking',
-    'VPC & NETWORKING CONFIGURATION',
-    'VPC settings, gateway configuration, DNS, tenancy and route table details',
-    detailColumns,
-    vpcRows
-  )
-
-  const subnetColumns = [
-    { header: 'VPC Resource', key: 'Resource' },
-    { header: 'Subnet Number', key: 'Subnet Number' },
-    { header: 'Subnet Name', key: 'Subnet Name' },
-    { header: 'Resource Key', key: 'Resource Key' },
-    { header: 'Subnet Type', key: 'Subnet Type' },
-    { header: 'CIDR Block', key: 'CIDR Block' },
-    { header: 'Subnet ID', key: 'Subnet ID' },
-    { header: 'Availability Zone', key: 'Availability Zone' },
-    { header: 'Map Public IP on Launch', key: 'Map Public IP on Launch' }
-  ]
-
-  createTableSheet(
-    workbook,
-    'Subnets',
-    'SUBNET CONFIGURATION',
-    'Individual subnet settings and network allocation details',
-    subnetColumns,
-    subnetRows
-  )
-
-  createTableSheet(
-    workbook,
-    'EC2 & Security',
-    'COMPUTE & SECURITY CONFIGURATION',
-    'EC2 specifications, instance networking, IAM and security group settings',
-    detailColumns,
-    ec2Rows
-  )
-
-  const securityColumns = [
-    { header: 'Resource', key: 'Resource' },
-    { header: 'Rule Type', key: 'Rule Type' },
-    { header: 'Rule Number', key: 'Rule Number' },
-    { header: 'Protocol', key: 'Protocol' },
-    { header: 'From Port', key: 'From Port' },
-    { header: 'To Port', key: 'To Port' },
-    { header: 'CIDR', key: 'CIDR' },
-    { header: 'Description', key: 'Description' }
-  ]
-
-  createTableSheet(
-    workbook,
-    'Security Group Rules',
-    'SECURITY GROUP RULES',
-    'Ingress and egress rules saved for EC2 security groups',
-    securityColumns,
-    securityRows
-  )
-
-  createTableSheet(
-    workbook,
-    'Storage',
-    'STORAGE CONFIGURATION',
-    'Root storage and additional EBS volume settings',
-    detailColumns,
-    storageRows
-  )
-
-  const pricingRows = await getPricingRows(data)
-
-  const pricingColumns = [
-    { header: 'Resource', key: 'Resource' },
-    { header: 'Component', key: 'Component' },
-    { header: 'Region', key: 'Region' },
-    { header: 'Status', key: 'Status' },
-    { header: 'Currency', key: 'Currency' },
-    { header: 'Unit', key: 'Unit' },
-    { header: 'Unit Rate', key: 'UnitRate' },
-    { header: 'Monthly Hours', key: 'Monthly Hours' },
-    { header: 'Quantity', key: 'Quantity' },
-    { header: 'Estimated Monthly Cost', key: 'Monthly Cost' },
-    { header: 'Details', key: 'Details' }
-  ]
-
-  const pricingWorksheet = createTableSheet(
-    workbook,
-    'Pricing',
-    'COST & PRICING DETAILS',
-    'Saved pricing breakdown or pricing lookup results, with calculation status',
-    pricingColumns,
-    pricingRows
-  )
-
-  pricingWorksheet.getColumn(7).numFmt = '#,##0.000000'
-  pricingWorksheet.getColumn(10).numFmt = '#,##0.00'
-
-  const terraform = data.terraformExecution || {}
-
-  const workflowRows = [
-    { Detail: 'Request Status', Value: data.status },
-    { Detail: 'Engineer Remarks', Value: data.engineerRemarks },
-    { Detail: 'Reviewed By', Value: data.reviewedBy?.name || data.reviewedBy },
-    { Detail: 'Terraform Generation', Value: terraform.generation },
-    { Detail: 'Terraform Init', Value: terraform.init },
-    { Detail: 'Terraform Validation', Value: terraform.validation },
-    { Detail: 'Terraform Plan', Value: terraform.plan },
-    { Detail: 'Terraform Plan Type', Value: terraform.planType },
-    { Detail: 'Terraform Folder', Value: terraform.terraformFolder },
-    { Detail: 'Terraform Executed At', Value: terraform.executedAt }
-  ].filter((row) => hasValue(row.Value))
-    .map((row) => ({
-      Detail: row.Detail,
-      Value: displayValue(row.Value)
-    }))
-
-  createTableSheet(
-    workbook,
-    'Approval & Terraform',
-    'APPROVAL & TERRAFORM EXECUTION',
-    'Approval workflow and Terraform execution status',
-    [
-      { header: 'Workflow Detail', key: 'Detail' },
-      { header: 'Saved Value', key: 'Value' }
-    ],
-    workflowRows
-  )
-
-  createTableSheet(
-    workbook,
-    'Complete Configuration',
-    'COMPLETE SAVED CONFIGURATION',
-    'All saved BOM fields and nested configuration values in readable paths',
-    [
-      { header: 'Configuration Path', key: 'Configuration Path' },
-      { header: 'Saved Value', key: 'Saved Value' }
-    ],
-    getCompleteConfigurationRows(data)
-  )
-
-  workbook.eachSheet((worksheet) => {
-    worksheet.eachRow((row) => {
-      row.eachCell((cell) => {
-        if (typeof cell.value === 'string' && cell.value.length > 500) {
-          cell.alignment = { vertical: 'top', wrapText: true }
-          row.height = 45
-        }
-      })
-    })
+  const worksheet = workbook.addWorksheet('My Estimate', {
+    properties: { defaultRowHeight: 21 },
+    pageSetup: {
+      orientation: 'landscape',
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      paperSize: 9,
+      margins: { left: 0.25, right: 0.25, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 }
+    }
   })
+
+  worksheet.views = [{ state: 'normal', showGridLines: false, zoomScale: 85 }]
+  worksheet.columns = [
+    { width: 22 },
+    { width: 20 },
+    { width: 30 },
+    { width: 21 },
+    { width: 17 },
+    { width: 17 },
+    { width: 21 },
+    { width: 12 },
+    { width: 22 },
+    { width: 66 }
+  ]
+
+  const navy = 'FF232F3E'
+  const awsOrange = 'FFFF9900'
+  const blue = 'FF1F5B85'
+  const paleBlue = 'FFEAF3F8'
+  const lightGray = 'FFF3F5F7'
+  const border = 'FFD5DCE3'
+  const text = 'FF202B36'
+  const white = 'FFFFFFFF'
+  const green = 'FFE6F4EA'
+  const amber = 'FFFFF3D6'
+
+  const borderBottom = { style: 'thin', color: { argb: border } }
+  const setSection = (rowNumber, title) => {
+    worksheet.mergeCells(rowNumber, 1, rowNumber, 10)
+    const cell = worksheet.getCell(rowNumber, 1)
+    cell.value = title
+    cell.font = { name: 'Aptos', size: 12, bold: true, color: { argb: white } }
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: blue } }
+    cell.alignment = { vertical: 'middle', horizontal: 'left' }
+    cell.border = { bottom: { style: 'medium', color: { argb: awsOrange } } }
+    worksheet.getRow(rowNumber).height = 27
+  }
+
+  const safeText = (value) => {
+    if (value === undefined || value === null || value === '') return ''
+    return displayValue(value)
+  }
+  const numeric = (value) => {
+    if (value === undefined || value === null || value === '' || value === 'Not available in current pricing data') return null
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  const money = (value) => value === null ? 'Not available' : Number(value.toFixed(2))
+  const currency = data.estimatedCost?.currency ||
+    pricingRows.find((row) => row.Currency)?.Currency || 'USD'
+  const monthlyHours = Number(data.estimatedCost?.monthlyHours || 730)
+
+  const getSubnetList = (vpc) => vpc.mode === 'existing'
+    ? [...(vpc.existingSubnets || []), ...(vpc.createdSubnets || [])]
+    : (vpc.subnets || [])
+
+  const securityRuleText = (securityGroup) => {
+    const rules = []
+    for (const [direction, entries] of [
+      ['Inbound', securityGroup?.ingressRules],
+      ['Outbound', securityGroup?.egressRules]
+    ]) {
+      ;(Array.isArray(entries) ? entries : []).forEach((rule) => {
+        const protocol = String(rule.protocol || 'All').toLowerCase() === '-1'
+          ? 'All protocols'
+          : String(rule.protocol || 'All').toUpperCase()
+        const from = rule.fromPort
+        const to = rule.toPort
+        const allPorts = (from === undefined || from === null || from === -1 || from === '-1') &&
+          (to === undefined || to === null || to === -1 || to === '-1')
+        const ports = allPorts
+          ? 'All ports'
+          : from === to || to === undefined || to === null
+            ? `Port ${from}`
+            : `Ports ${from}-${to}`
+        rules.push(`${direction}: ${protocol}; ${ports}; ${rule.cidr || rule.source || rule.destination || 'Not specified'}${rule.description ? `; ${rule.description}` : ''}`)
+      })
+    }
+    return rules
+  }
+
+  const configurationFor = (resource, index) => {
+    const service = String(resource.service || '').toUpperCase()
+    const ec2 = resource.ec2Configuration || {}
+    const network = ec2.network || {}
+    const vpc = resource.vpcConfiguration || {}
+    const details = []
+    const push = (label, value) => {
+      if (hasValue(value)) details.push(`${label}: ${displayValue(value)}`)
+    }
+
+    if (service === 'EC2') {
+      push('Instance type', resource.instanceType || ec2.instanceType)
+      push('vCPU', resource.cpu ?? ec2.cpu)
+      push('Memory', resource.ram ?? ec2.ram)
+      push('Operating system', resource.operatingSystem || ec2.operatingSystem)
+      push('Instance quantity', resource.quantity ?? ec2.quantity ?? 1)
+      const rootSize = resource.storage ?? ec2.storage
+      if (hasValue(rootSize)) push('Root volume', `${rootSize} GiB ${resource.storageType || ec2.storageType || ''}`.trim())
+
+      const vpcResource = resources.find((candidate) =>
+        String(candidate.service || '').toUpperCase() === 'VPC' &&
+        candidate.resourceKey && candidate.resourceKey === network.vpcResourceKey
+      )
+      push('VPC', vpcResource
+        ? getResourceName(vpcResource, resources.indexOf(vpcResource))
+        : (network.vpcId || network.vpcSource))
+
+      const subnetResource = resources.find((candidate) =>
+        String(candidate.service || '').toUpperCase() === 'VPC' &&
+        getSubnetList(candidate.vpcConfiguration || {}).some((subnet) =>
+          subnet.resourceKey === network.subnetResourceKey || subnet.subnetId === network.subnetId
+        )
+      )
+      const subnetList = subnetResource ? getSubnetList(subnetResource.vpcConfiguration || {}) : []
+      const matchedSubnet = subnetList.find((subnet) =>
+        subnet.resourceKey === network.subnetResourceKey || subnet.subnetId === network.subnetId
+      )
+      if (matchedSubnet) {
+        const subnetIndex = subnetList.indexOf(matchedSubnet)
+        push('Subnet', `${matchedSubnet.name || `Subnet ${subnetIndex + 1}`}${matchedSubnet.subnetType ? ` (${matchedSubnet.subnetType})` : ''}`)
+      } else if (network.subnetId) {
+        push('Subnet ID', network.subnetId)
+      } else if (network.subnetResourceKey) {
+        push('Subnet', 'Selected subnet (name not available in saved configuration)')
+      }
+
+      push('Public IP assignment', network.associatePublicIpAddress)
+      const securityGroup = network.securityGroup || {}
+      push('Security group', securityGroup.name || (Array.isArray(network.securityGroupIds) ? network.securityGroupIds.join(', ') : network.securityGroupIds))
+      const rules = securityRuleText(securityGroup)
+      if (rules.length) push('Security group rules', rules.join(' | '))
+
+      ;(Array.isArray(resource.ebsVolumes) ? resource.ebsVolumes : []).forEach((volume, volumeIndex) => {
+        details.push(`Additional EBS volume ${volumeIndex + 1}: ${volume.name || volume.deviceName || 'EBS volume'}; ${volume.sizeGiB ?? 'Size not specified'} GiB; ${volume.volumeType || 'Type not specified'}${hasValue(volume.iops) ? `; ${volume.iops} IOPS` : ''}${hasValue(volume.throughput) ? `; ${volume.throughput} MiB/s` : ''}`)
+      })
+    } else if (service === 'VPC') {
+      push('VPC mode', vpc.mode === 'existing' ? 'Existing VPC' : 'New VPC')
+      push('VPC CIDR', vpc.ipv4Cidr || vpc.existingVpcCidr)
+      push('Existing VPC ID', vpc.existingVpcId)
+      push('DNS resolution', vpc.enableDnsSupport)
+      push('DNS hostnames', vpc.enableDnsHostnames)
+      push('Internet Gateway', vpc.createInternetGateway)
+      push('NAT Gateway configuration', vpc.natGatewayMode)
+      push('IPv6 configuration', vpc.ipv6Mode)
+      getSubnetList(vpc).forEach((subnet, subnetIndex) => {
+        details.push(`Subnet ${subnetIndex + 1}: ${subnet.name || `Subnet ${subnetIndex + 1}`}; ${String(subnet.subnetType || 'type not specified').toLowerCase()}; CIDR ${subnet.ipv4Cidr || subnet.cidr || 'not specified'}${subnet.availabilityZone ? `; ${subnet.availabilityZone}` : ''}`)
+      })
+      ;(Array.isArray(vpc.routeTables) ? vpc.routeTables : []).forEach((routeTable, routeIndex) => {
+        details.push(`Route table ${routeIndex + 1}: ${routeTable.name || 'Route table'}${routeTable.routes?.length ? `; ${routeTable.routes.map((route) => `${route.destination || route.cidr || 'Destination'} via ${route.target || route.gatewayId || 'target not specified'}`).join(', ')}` : ''}`)
+      })
+    } else {
+      push('Quantity', resource.quantity)
+      push('Configuration', resource.configuration)
+      push('Storage', resource.storage)
+      push('Storage type', resource.storageType)
+    }
+
+    return details.length ? details.join('\n') : 'No additional configuration details were saved.'
+  }
+
+  // AWS Pricing Calculator flow: estimate summary first.
+  worksheet.mergeCells('A1:J1')
+  worksheet.getCell('A1').value = 'My Estimate'
+  worksheet.getCell('A1').font = { name: 'Aptos Display', size: 21, bold: true, color: { argb: white } }
+  worksheet.getCell('A1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: navy } }
+  worksheet.getCell('A1').alignment = { vertical: 'middle', horizontal: 'left' }
+  worksheet.getRow(1).height = 39
+
+  worksheet.mergeCells('A2:J2')
+  worksheet.getCell('A2').value = `Cloud Infrastructure Portal | ${data.projectName || data.ticketId || 'Cloud infrastructure estimate'} | Generated ${new Date().toLocaleString()}`
+  worksheet.getCell('A2').font = { name: 'Aptos', size: 10, color: { argb: text } }
+  worksheet.getCell('A2').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: paleBlue } }
+  worksheet.getCell('A2').alignment = { vertical: 'middle' }
+  worksheet.getRow(2).height = 25
+
+  setSection(4, 'Estimate summary')
+  const monthlyValues = pricingRows.map((row) => numeric(row['Monthly Cost'])).filter((value) => value !== null)
+  const computedMonthly = monthlyValues.length
+    ? Number(monthlyValues.reduce((sum, value) => sum + value, 0).toFixed(2))
+    : null
+  const monthlyTotal = numeric(data.estimatedCost?.monthlyTotal) ?? computedMonthly
+  const upfrontValues = pricingRows.map((row) => numeric(row.UpfrontCost ?? row.upfrontCost ?? row['Upfront Cost'])).filter((value) => value !== null)
+  const upfrontTotal = upfrontValues.length
+    ? Number(upfrontValues.reduce((sum, value) => sum + value, 0).toFixed(2))
+    : null
+  const firstYearTotal = monthlyTotal === null ? null : Number((monthlyTotal * 12 + (upfrontTotal || 0)).toFixed(2))
+  const pricedRows = pricingRows.filter((row) => numeric(row['Monthly Cost']) !== null)
+  const unavailableRows = pricingRows.filter((row) => String(row.Status || '').toLowerCase() === 'unavailable')
+  const pricedResourceIndexes = new Set(pricingRows.map((row) => getCsvResourceIndex(row, resources)).filter((index) => index >= 0))
+  const hasUnpricedConfiguredResources = resources.some((resource, index) =>
+    ['VPC', 'EC2'].includes(String(resource.service || '').toUpperCase()) && !pricedResourceIndexes.has(index)
+  )
+  const pricingStatus = !pricingRows.length || pricedRows.length === 0
+    ? 'Pricing unavailable'
+    : unavailableRows.length > 0 || pricedRows.length < pricingRows.length || hasUnpricedConfiguredResources
+      ? 'Partially priced'
+      : 'Calculated'
+
+  const summaryHeaders = ['Upfront cost', 'Monthly cost', 'Total 12 months cost', 'Currency']
+  summaryHeaders.forEach((header, index) => {
+    const cell = worksheet.getCell(5, index + 1)
+    cell.value = header
+    cell.font = { bold: true, color: { argb: white }, size: 10 }
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: blue } }
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }
+    cell.border = { bottom: { style: 'medium', color: { argb: awsOrange } } }
+  })
+  worksheet.getRow(5).height = 30
+  const summaryValues = [
+    upfrontTotal === null ? 'Not available' : upfrontTotal,
+    monthlyTotal === null ? 'Not available' : monthlyTotal,
+    firstYearTotal === null ? 'Not available' : firstYearTotal,
+    currency
+  ]
+  summaryValues.forEach((value, index) => {
+    const cell = worksheet.getCell(6, index + 1)
+    cell.value = value
+    cell.font = { bold: true, size: 13, color: { argb: text } }
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index === 2 ? green : paleBlue } }
+    cell.alignment = { vertical: 'middle', horizontal: index === 3 ? 'center' : 'right' }
+    cell.border = { bottom: borderBottom }
+    if (index < 3 && typeof value === 'number') cell.numFmt = '#,##0.00;[Red](#,##0.00);-'
+  })
+  worksheet.getRow(6).height = 31
+
+  worksheet.mergeCells('A7:J7')
+  worksheet.getCell('A7').value = '* Includes upfront cost in the first 12 months total. Unpriced resources and components are excluded from the displayed estimate.'
+  worksheet.getCell('A7').font = { italic: true, size: 9, color: { argb: 'FF596675' } }
+  worksheet.getCell('A7').alignment = { wrapText: true, vertical: 'middle' }
+  worksheet.getRow(7).height = 27
+
+  worksheet.mergeCells('A8:J8')
+  worksheet.getCell('A8').value = `Pricing status: ${pricingStatus}  |  Usage assumption: ${monthlyHours} hours per month where hourly pricing applies`
+  worksheet.getCell('A8').font = { bold: true, size: 10, color: { argb: text } }
+  worksheet.getCell('A8').fill = { type: 'pattern', pattern: 'solid', fgColor: pricingStatus === 'Calculated' ? green : amber }
+  worksheet.getCell('A8').alignment = { wrapText: true, vertical: 'middle' }
+  worksheet.getRow(8).height = 25
+
+  // Detailed estimate follows the same ten-column order and labels as AWS CSV.
+  setSection(10, 'Detailed Estimate')
+  const detailHeaders = [
+    'Group hierarchy', 'Region', 'Description', 'Service', 'Upfront',
+    'Monthly', 'First 12 months total', 'Currency', 'Status', 'Configuration summary'
+  ]
+  detailHeaders.forEach((header, index) => {
+    const cell = worksheet.getCell(11, index + 1)
+    cell.value = header
+    cell.font = { bold: true, color: { argb: white }, size: 10 }
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: navy } }
+    cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true }
+    cell.border = { bottom: { style: 'medium', color: { argb: awsOrange } } }
+  })
+  worksheet.getRow(11).height = 34
+
+  let rowNumber = 12
+  const addDetailRow = (values, options = {}) => {
+    const row = worksheet.getRow(rowNumber)
+    values.forEach((value, index) => {
+      const cell = row.getCell(index + 1)
+      cell.value = value ?? ''
+      cell.font = {
+        name: 'Aptos',
+        size: 10,
+        bold: Boolean(options.bold),
+        color: { argb: options.color || text }
+      }
+      cell.alignment = {
+        vertical: 'top',
+        horizontal: [4, 5, 6].includes(index + 1) ? 'right' : 'left',
+        wrapText: true
+      }
+      cell.border = { bottom: borderBottom }
+      if (options.fill) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: options.fill } }
+      else if (rowNumber % 2 === 0) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } }
+      if ([5, 6, 7].includes(index + 1) && typeof value === 'number') {
+        cell.numFmt = '#,##0.00;[Red](#,##0.00);-'
+      }
+    })
+    const configLength = String(values[9] || '').length
+    row.height = Math.min(110, Math.max(30, 22 * Math.ceil(configLength / 95)))
+    rowNumber += 1
+  }
+
+  const resourcesWithPricing = new Set()
+  pricingRows.forEach((pricingRow) => {
+    const index = getCsvResourceIndex(pricingRow, resources)
+    const resource = index >= 0 ? resources[index] : null
+    if (index >= 0) resourcesWithPricing.add(index)
+    const component = String(pricingRow.Component || 'Service component')
+    const resourceService = String(resource?.service || pricingRow.Service || '').toUpperCase()
+    const service = /storage|volume|disk/i.test(component) ? 'EBS' : resourceService
+    const monthly = numeric(pricingRow['Monthly Cost'])
+    const upfront = numeric(pricingRow.UpfrontCost ?? pricingRow.upfrontCost ?? pricingRow['Upfront Cost'])
+    const first12 = monthly === null ? null : Number((monthly * 12 + (upfront || 0)).toFixed(2))
+    const description = `${resource ? getResourceName(resource, index) : (pricingRow.Resource || 'Cloud resource')} - ${component}`
+    const unitRate = numeric(pricingRow.UnitRate)
+    const pricingAssumptions = [
+      pricingRow.Quantity ? `Pricing quantity: ${pricingRow.Quantity}` : '',
+      unitRate !== null ? `Unit rate: ${unitRate} per ${pricingRow.Unit || 'unit'}` : '',
+      pricingRow['Monthly Hours'] ? `Usage assumption: ${pricingRow['Monthly Hours']} hours/month` : '',
+      pricingRow.Details || ''
+    ].filter(Boolean)
+
+    const resourceConfiguration = resource
+      ? service === 'EBS' && resourceService === 'EC2'
+        ? [
+            hasValue(resource.storage ?? resource.ec2Configuration?.storage)
+              ? `Root volume size: ${displayValue(resource.storage ?? resource.ec2Configuration?.storage)} GiB`
+              : '',
+            hasValue(resource.storageType ?? resource.ec2Configuration?.storageType)
+              ? `Root volume type: ${displayValue(resource.storageType ?? resource.ec2Configuration?.storageType)}`
+              : '',
+            hasValue(resource.quantity ?? resource.ec2Configuration?.quantity)
+              ? `Attached to EC2 instances: ${displayValue(resource.quantity ?? resource.ec2Configuration?.quantity)}`
+              : ''
+          ].filter(Boolean).join('\n') || 'Root volume configuration details were not saved.'
+        : configurationFor(resource, index)
+      : ''
+    const config = [
+      resourceConfiguration,
+      pricingAssumptions.length ? `Pricing assumptions:\n${pricingAssumptions.join('\n')}` : ''
+    ].filter(Boolean).join('\n\n')
+
+    addDetailRow([
+      service === 'EC2' ? 'Compute' : service === 'VPC' ? 'Networking' : service === 'EBS' ? 'Storage' : (service || 'Cloud services'),
+      resource?.region || pricingRow.Region || data.region || '',
+      description,
+      service,
+      upfront === null ? 'Not available' : upfront,
+      monthly === null ? 'Not available' : monthly,
+      first12 === null ? 'Not available' : first12,
+      pricingRow.Currency || currency,
+      pricingRow.Status || (monthly === null ? 'Unavailable' : 'Available'),
+      config
+    ])
+  })
+
+  // Keep configuration-only resources visible in the Detailed Estimate hierarchy.
+  resources.forEach((resource, index) => {
+    if (resourcesWithPricing.has(index)) return
+    const service = String(resource.service || '').toUpperCase()
+    const group = service === 'EC2' ? 'Compute' : service === 'VPC' ? 'Networking' : service || 'Cloud services'
+    const description = service === 'VPC' && resource.vpcConfiguration?.mode === 'existing' && resource.vpcConfiguration?.existingVpcId
+      ? `Existing VPC - ${resource.vpcConfiguration.existingVpcId}`
+      : getResourceName(resource, index)
+    addDetailRow([
+      group,
+      resource.region || data.region || '',
+      description,
+      service,
+      'Not available',
+      'Not available',
+      'Not available',
+      currency,
+      'Configuration only - no supported price available',
+      configurationFor(resource, index)
+    ], { fill: amber })
+  })
+
+  if (rowNumber === 12) {
+    addDetailRow(['My Estimate', data.region || '', 'No priced components available', data.cloudProvider || 'AWS', 'Not available', 'Not available', 'Not available', currency, pricingStatus, 'No pricing rows were available for this BOM.'])
+  }
+
+  // Acknowledgement is the final section, as in the AWS export.
+  rowNumber += 1
+  setSection(rowNumber, 'Acknowledgement')
+  rowNumber += 1
+  worksheet.mergeCells(rowNumber, 1, rowNumber + 1, 10)
+  const acknowledgement = worksheet.getCell(rowNumber, 1)
+  acknowledgement.value = 'This estimate is for planning purposes only and does not represent a quote or guarantee of actual cloud charges. Actual fees depend on service usage, selected configuration, region, pricing changes, discounts, taxes and other applicable fees. Only costs supported by the portal pricing data are included. Resources or components marked as not priced are excluded from the displayed totals and should not be interpreted as free.'
+  acknowledgement.font = { name: 'Aptos', size: 10, color: { argb: text } }
+  acknowledgement.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: lightGray } }
+  acknowledgement.alignment = { vertical: 'middle', wrapText: true }
+  acknowledgement.border = {
+    top: borderBottom,
+    bottom: borderBottom,
+    left: borderBottom,
+    right: borderBottom
+  }
+  worksheet.getRow(rowNumber).height = 38
+  worksheet.getRow(rowNumber + 1).height = 28
+
+  worksheet.autoFilter = {
+    from: { row: 11, column: 1 },
+    to: { row: Math.max(11, rowNumber - 2), column: 10 }
+  }
+  worksheet.views = [{ state: 'normal', showGridLines: false, zoomScale: 85 }]
+  worksheet.freezePanes = 'A12'
+  worksheet.printArea = `A1:J${rowNumber + 1}`
+  worksheet.pageSetup = {
+    orientation: 'landscape',
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    paperSize: 9,
+    margins: { left: 0.25, right: 0.25, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 }
+  }
+  worksheet.headerFooter.oddHeader = '&BMy Estimate | Cloud Infrastructure Portal'
+  worksheet.headerFooter.oddFooter = 'Estimate for planning purposes | Page &P of &N'
 
   return workbook.xlsx.writeBuffer()
 }
