@@ -1,7 +1,9 @@
 {
   "dependencies": {
+    "@aws-sdk/client-ec2": "^3.1161.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.5",
+    "exceljs": "^4.4.0",
     "mongoose": "^9.10.4"
   }
 }

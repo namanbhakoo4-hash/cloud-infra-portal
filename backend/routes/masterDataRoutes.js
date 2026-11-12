@@ -1,13 +1,59 @@
-
 const express = require('express')
 
 const MasterData = require('../models/MasterData')
+const {
+  EC2Client,
+  DescribeRegionsCommand,
+  DescribeAvailabilityZonesCommand
+} = require('@aws-sdk/client-ec2')
 const authMiddleware = require('../middleware/authMiddleware')
 const roleMiddleware = require('../middleware/roleMiddleware')
 
 const router = express.Router()
 
 const PROVIDERS = ['aws', 'azure', 'gcp']
+
+const AWS_DEVELOPMENT_REGIONS = [
+  'af-south-1',
+  'ap-east-1',
+  'ap-east-2',
+  'ap-northeast-1',
+  'ap-northeast-2',
+  'ap-northeast-3',
+  'ap-south-1',
+  'ap-south-2',
+  'ap-southeast-1',
+  'ap-southeast-2',
+  'ap-southeast-3',
+  'ap-southeast-4',
+  'ap-southeast-5',
+  'ap-southeast-7',
+  'ca-central-1',
+  'ca-west-1',
+  'eu-central-1',
+  'eu-central-2',
+  'eu-north-1',
+  'eu-south-1',
+  'eu-south-2',
+  'eu-west-1',
+  'eu-west-2',
+  'eu-west-3',
+  'il-central-1',
+  'me-central-1',
+  'me-south-1',
+  'mx-central-1',
+  'sa-east-1',
+  'us-east-1',
+  'us-east-2',
+  'us-west-1',
+  'us-west-2'
+]
+
+const buildDevelopmentAvailabilityZones = (region) => [
+  { zoneName: `${region}a`, state: 'sample' },
+  { zoneName: `${region}b`, state: 'sample' },
+  { zoneName: `${region}c`, state: 'sample' }
+]
 
 const getProvider = (value) => {
   return value === undefined || value === ''
@@ -34,9 +80,7 @@ const isValidInstanceSpecs = (cpu, ram) => {
   )
 }
 
-// =====================================================
 // 1. CREATE MASTER DATA - ADMIN
-// =====================================================
 
 router.post(
   '/',
@@ -126,10 +170,7 @@ router.post(
   }
 )
 
-// =====================================================
 // 2. GET ALL MASTER DATA
-// Optional cloudProvider query
-// =====================================================
 
 router.get(
   '/',
@@ -144,8 +185,6 @@ router.get(
         })
       }
 
-      // No query: preserve existing Admin behavior,
-      // returning all providers.
       const filter = req.query.cloudProvider === undefined
         ? {}
         : { cloudProvider }
@@ -172,9 +211,132 @@ router.get(
   }
 )
 
-// =====================================================
-// 3. GET ACTIVE MASTER DATA BY CATEGORY AND PROVIDER
-// =====================================================
+// 3. GET AWS REGIONS
+
+router.get(
+  '/regions',
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const client = new EC2Client({
+        region: process.env.AWS_REGION || 'us-east-1'
+      })
+
+      const response = await client.send(
+        new DescribeRegionsCommand({ AllRegions: true })
+      )
+
+      const regions = (response.Regions || [])
+        .filter((item) =>
+          ['opt-in-not-required', 'opted-in'].includes(item.OptInStatus)
+        )
+        .map((item) => ({
+          name: item.RegionName,
+          value: item.RegionName,
+          optInStatus: item.OptInStatus
+        }))
+        .filter((item) => item.value)
+        .sort((a, b) => a.value.localeCompare(b.value))
+
+      return res.json({
+        message: 'AWS Regions fetched successfully',
+        cloudProvider: 'aws',
+        source: 'aws-api',
+        isLive: true,
+        regions
+      })
+
+    } catch (error) {
+      console.warn(
+        'AWS Region discovery unavailable; using development catalogue:',
+        error.name || error.message
+      )
+
+      const regions = AWS_DEVELOPMENT_REGIONS.map((region) => ({
+        name: region,
+        value: region,
+        optInStatus: 'catalogue-only'
+      }))
+
+      return res.json({
+        message: 'AWS credentials are unavailable. Showing a maintained development Region catalogue.',
+        cloudProvider: 'aws',
+        source: 'development-catalogue',
+        isLive: false,
+        warning: 'Region names are catalogue data and have not been verified against your AWS account.',
+        regions
+      })
+    }
+  }
+)
+
+// 4. GET AWS AVAILABILITY ZONES
+
+router.get(
+  '/availability-zones',
+  authMiddleware,
+  async (req, res) => {
+    const region = String(req.query.region || '').trim()
+
+    try {
+      if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/.test(region)) {
+        return res.status(400).json({
+          message: 'A valid AWS region is required'
+        })
+      }
+
+      const client = new EC2Client({ region })
+
+      const response = await client.send(
+        new DescribeAvailabilityZonesCommand({
+          AllAvailabilityZones: true
+        })
+      )
+
+      const availabilityZones = (response.AvailabilityZones || [])
+        .filter((zone) =>
+          zone.ZoneName &&
+          ['available', 'impaired', 'unavailable'].includes(
+            String(zone.State || '').toLowerCase()
+          )
+        )
+        .map((zone) => ({
+          zoneName: zone.ZoneName,
+          zoneId: zone.ZoneId || '',
+          state: zone.State || 'unknown',
+          zoneType: zone.ZoneType || 'availability-zone'
+        }))
+        .sort((a, b) => a.zoneName.localeCompare(b.zoneName))
+
+      return res.json({
+        message: 'AWS Availability Zones fetched successfully',
+        cloudProvider: 'aws',
+        region,
+        source: 'aws-api',
+        isLive: true,
+        availabilityZones
+      })
+
+    } catch (error) {
+      console.warn(
+        `AWS Availability Zone discovery unavailable for ${region}; using development sample zones:`,
+        error.name || error.message
+      )
+
+      return res.json({
+        message: `AWS credentials are unavailable. Showing sample Availability Zones for ${region}.`,
+        cloudProvider: 'aws',
+        region,
+        source: 'development-catalogue',
+        isLive: false,
+        warning: 'These AZ names are illustrative only. Verify actual Availability Zones in AWS before provisioning.',
+        availabilityZones: buildDevelopmentAvailabilityZones(region)
+      })
+    }
+  }
+)
+
+// 5. GET ACTIVE MASTER DATA BY CATEGORY AND PROVIDER
 
 router.get(
   '/category/:category',
@@ -183,9 +345,6 @@ router.get(
     try {
       const cloudProvider = getProvider(req.query.cloudProvider)
 
-      // =============================================
-      // TEMPORARY DEBUGGING - NEWLY ADDED
-      // =============================================
       console.log('Requested provider:', cloudProvider)
       console.log('Requested category:', req.params.category)
       console.log('Full request URL:', req.originalUrl)
@@ -204,7 +363,6 @@ router.get(
         name: 1
       })
 
-      // TEMPORARY DEBUGGING
       console.log('Records found:', masterData.length)
       console.log('-----------------------------------')
 
@@ -224,9 +382,7 @@ router.get(
   }
 )
 
-// =====================================================
-// 4. UPDATE MASTER DATA - ADMIN
-// =====================================================
+// 6. UPDATE MASTER DATA - ADMIN
 
 router.put(
   '/:id',
@@ -334,9 +490,7 @@ router.put(
   }
 )
 
-// =====================================================
-// 5. DELETE MASTER DATA - ADMIN
-// =====================================================
+// 7. DELETE MASTER DATA - ADMIN
 
 router.delete(
   '/:id',

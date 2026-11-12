@@ -1,0 +1,122 @@
+.existing-subnets-section {
+  width: 100%;
+  min-width: 0;
+}
+
+.existing-subnets-section > label {
+  display: block;
+  margin-bottom: 14px;
+  color: #172554;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.existing-subnets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.existing-subnet-item {
+  width: 100%;
+  min-width: 0;
+  padding: 16px;
+  box-sizing: border-box;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.existing-subnet-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  margin-top: 14px;
+}
+
+.existing-subnets-section button.existing-subnet-remove,
+.existing-subnets-section button.existing-subnet-add {
+  box-sizing: border-box !important;
+  display: inline-flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 10px !important;
+  height: 48px !important;
+  min-height: 48px !important;
+  max-height: 48px !important;
+  padding: 0 22px !important;
+  font-family: inherit !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  line-height: 1 !important;
+  text-align: center !important;
+  white-space: nowrap !important;
+  cursor: pointer !important;
+  flex: 0 0 auto !important;
+  transform: none;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+.existing-subnets-section button.existing-subnet-remove {
+  width: 190px !important;
+  color: #dc2626 !important;
+  background: #fff5f5 !important;
+  border: 1px solid #fca5a5 !important;
+  border-radius: 9px !important;
+  box-shadow: none !important;
+}
+
+.existing-subnets-section button.existing-subnet-remove:hover {
+  background: #fee2e2 !important;
+  border-color: #ef4444 !important;
+  box-shadow: 0 3px 9px rgba(220, 38, 38, 0.10) !important;
+}
+
+.existing-subnets-section button.existing-subnet-add {
+  width: 100% !important;
+  height: 50px !important;
+  min-height: 50px !important;
+  max-height: 50px !important;
+  margin-top: 14px !important;
+  color: #fff !important;
+  background: linear-gradient(110deg, #1672e8, #123fce) !important;
+  border: 1px solid #1d4ed8 !important;
+  border-radius: 9px !important;
+  box-shadow: 0 3px 8px rgba(29, 78, 216, 0.16) !important;
+}
+
+.existing-subnets-section button.existing-subnet-add:hover {
+  background: linear-gradient(110deg, #125fc9, #1035b5) !important;
+  box-shadow: 0 5px 12px rgba(29, 78, 216, 0.22) !important;
+}
+
+.existing-subnet-button-icon {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 19px !important;
+  height: 19px !important;
+  flex: 0 0 19px !important;
+  font-size: 19px !important;
+  line-height: 1 !important;
+}
+
+.existing-subnet-button-icon svg {
+  display: block;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 19px;
+}
+
+@media (max-width: 640px) {
+  .existing-subnet-item {
+    padding: 12px;
+  }
+
+  .existing-subnets-section button.existing-subnet-remove {
+    width: 100% !important;
+  }
+}

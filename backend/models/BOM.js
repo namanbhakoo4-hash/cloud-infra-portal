@@ -26,6 +26,17 @@ const vpcSubnetSchema = new mongoose.Schema({
   mapPublicIpOnLaunch: { type: Boolean, default: false }
 }, { _id: false })
 
+const existingVpcSubnetSchema = new mongoose.Schema({
+  resourceKey: { type: String, trim: true, default: '' },
+  subnetId: { type: String, trim: true, default: '' },
+  subnetType: {
+    type: String,
+    enum: ['public', 'private'],
+    default: 'private'
+  },
+  ipv4Cidr: { type: String, trim: true, default: '' }
+}, { _id: false })
+
 const vpcConfigurationSchema = new mongoose.Schema({
   mode: {
     type: String,
@@ -44,6 +55,20 @@ const vpcConfigurationSchema = new mongoose.Schema({
   publicQuantity: { type: Number, min: 0, max: 100, default: 0 },
   privateQuantity: { type: Number, min: 0, max: 100, default: 0 },
   subnets: { type: [vpcSubnetSchema], default: [] },
+  existingVpcCidr: { type: String, trim: true, default: '' },
+  existingSubnets: {
+    type: [existingVpcSubnetSchema],
+    default: []
+  },
+  createdSubnets: {
+    type: [vpcSubnetSchema],
+    default: []
+  },
+  existingRouteTableId: {
+    type: String,
+    trim: true,
+    default: ''
+  },
   createInternetGateway: { type: Boolean, default: false },
   natGatewayMode: {
     type: String,
@@ -65,6 +90,57 @@ const vpcConfigurationSchema = new mongoose.Schema({
   existingVpcId: { type: String, trim: true, default: '' }
 }, { _id: false })
 
+const securityGroupRuleSchema = new mongoose.Schema({
+  protocol: {
+    type: String,
+    enum: ['tcp', 'udp', 'icmp', '-1'],
+    required: true
+  },
+  fromPort: {
+    type: Number,
+    min: 1,
+    max: 65535,
+    default: undefined
+  },
+  toPort: {
+    type: Number,
+    min: 1,
+    max: 65535,
+    default: undefined
+  },
+  cidr: {
+    type: String,
+    trim: true,
+    required: true
+  },
+  description: {
+    type: String,
+    trim: true,
+    default: ''
+  }
+}, { _id: false })
+
+const securityGroupConfigurationSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  description: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  ingressRules: {
+    type: [securityGroupRuleSchema],
+    default: []
+  },
+  egressRules: {
+    type: [securityGroupRuleSchema],
+    default: []
+  }
+}, { _id: false })
+
 const ec2NetworkSchema = new mongoose.Schema({
   vpcSource: {
     type: String,
@@ -76,7 +152,19 @@ const ec2NetworkSchema = new mongoose.Schema({
   subnetResourceKey: { type: String, default: '' },
   subnetId: { type: String, default: '' },
   associatePublicIpAddress: { type: Boolean, default: false },
-  securityGroupIds: { type: [String], default: [] }
+  securityGroupMode: {
+    type: String,
+    enum: ['existing', 'new'],
+    default: 'existing'
+  },
+  securityGroupIds: {
+    type: [String],
+    default: []
+  },
+  securityGroup: {
+    type: securityGroupConfigurationSchema,
+    default: undefined
+  }
 }, { _id: false })
 
 const ec2ConfigurationSchema = new mongoose.Schema({
@@ -212,7 +300,7 @@ const terraformExecutionSchema = new mongoose.Schema({
     enum: ['Not Started', 'Success', 'Failed'],
     default: 'Not Started'
   },
-  validate: {
+  validation: {
     type: String,
     enum: ['Not Started', 'Success', 'Failed'],
     default: 'Not Started'

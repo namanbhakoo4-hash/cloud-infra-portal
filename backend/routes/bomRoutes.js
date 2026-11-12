@@ -1,4 +1,3 @@
-
 const express = require('express')
 const crypto = require('crypto')
 const fs = require('fs/promises')
@@ -17,6 +16,11 @@ const {
 const {
   createTerraformFiles
 } = require('../services/terraformService')
+
+const {
+  buildBomCsv,
+  buildBomXlsx
+} = require('../services/bomCsvExportService')
 
 // =====================================================
 // REGION CONFIGURATION FOR SIMULATED WORKFLOW
@@ -44,14 +48,20 @@ function getConfiguredAvailabilityZones(region) {
 // RESOURCE NORMALIZATION AND SUBNET GENERATION
 // =====================================================
 
-function normalizeResources(resources, region) {
+function normalizeResources(resources, fallbackRegion) {
   if (!Array.isArray(resources) || resources.length === 0) {
     throw new Error('Add at least one resource to the BOM.')
   }
 
   const resourceKeys = new Set()
-  const availabilityZones =
-    getConfiguredAvailabilityZones(region)
+  const vpcRegions = new Map()
+
+  resources.forEach((resource, index) => {
+    if (String(resource?.service || '').trim().toUpperCase() === 'VPC') {
+      const resourceRegion = String(resource.region || fallbackRegion || '').trim()
+      if (resourceRegion) vpcRegions.set(String(resource.resourceKey || `resource_${index + 1}`).trim(), resourceRegion)
+    }
+  })
 
   return resources.map((resource, index) => {
     if (!resource || typeof resource !== 'object') {
@@ -83,6 +93,11 @@ function normalizeResources(resources, region) {
 
     resourceKeys.add(resourceKey)
 
+    const resourceRegion = String(resource.region || fallbackRegion || '').trim()
+    if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/.test(resourceRegion)) {
+      throw new Error(`Select a valid AWS Region for resource ${index + 1}.`)
+    }
+
     if (service === 'EC2') {
       const config = resource.ec2Configuration
 
@@ -104,12 +119,24 @@ function normalizeResources(resources, region) {
         )
       }
 
+      const network = config.network || {}
+      if (network.vpcSource === 'bom') {
+        const linkedVpcRegion = vpcRegions.get(String(network.vpcResourceKey || ''))
+        if (!linkedVpcRegion) {
+          throw new Error(`EC2 resource ${index + 1} references a VPC that is missing from the BOM.`)
+        }
+        if (linkedVpcRegion !== resourceRegion) {
+          throw new Error(`EC2 resource ${index + 1} must use the same AWS Region (${linkedVpcRegion}) as its selected BOM VPC.`)
+        }
+      }
+
       // AMI is intentionally optional. The Terraform service
       // will resolve it from the selected OS and region later.
       return {
         ...resource,
         resourceKey,
         service,
+        region: resourceRegion,
         ec2Configuration: {
           ...config,
           quantity,
@@ -126,10 +153,65 @@ function normalizeResources(resources, region) {
       )
     }
 
-    if (config.mode && config.mode !== 'new') {
-      throw new Error(
-        'New BOM submissions must create a new VPC. Existing VPC selection is not supported in the new form.'
-      )
+    if ((config.mode || 'new') === 'existing') {
+      const existingVpcId = String(config.existingVpcId || '').trim()
+      const awsVpcIdPattern = /^vpc-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+      const awsSubnetIdPattern = /^subnet-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+      const awsRouteTableIdPattern = /^rtb-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+
+      if (!awsVpcIdPattern.test(existingVpcId)) {
+        throw new Error(`Existing VPC ID for resource ${index + 1} is invalid.`)
+      }
+
+      if (!Array.isArray(config.existingSubnets) || config.existingSubnets.length === 0) {
+        throw new Error(`Add at least one existing subnet to resource ${index + 1}.`)
+      }
+
+      const existingSubnets = config.existingSubnets.map((subnet, subnetIndex) => {
+        const subnetId = String(subnet.subnetId || '').trim()
+        const subnetKey = String(subnet.resourceKey || `${resourceKey}_existing_subnet_${subnetIndex + 1}`).trim()
+        const subnetType = String(subnet.subnetType || 'private').toLowerCase()
+
+        if (!awsSubnetIdPattern.test(subnetId)) {
+          throw new Error(`Existing subnet ${subnetIndex + 1} for resource ${index + 1} has an invalid subnet ID.`)
+        }
+
+        if (!/^[a-zA-Z0-9_-]+$/.test(subnetKey)) {
+          throw new Error(`Existing subnet ${subnetIndex + 1} has an invalid resource key.`)
+        }
+
+        if (!['public', 'private'].includes(subnetType)) {
+          throw new Error(`Existing subnet ${subnetIndex + 1} has an invalid subnet type.`)
+        }
+
+        return { resourceKey: subnetKey, subnetId, subnetType }
+      })
+
+      if (config.existingRouteTableId && !awsRouteTableIdPattern.test(String(config.existingRouteTableId).trim())) {
+        throw new Error(`Existing route table ID for resource ${index + 1} is invalid.`)
+      }
+
+      const subnetKeys = new Set()
+      for (const subnet of existingSubnets) {
+        if (subnetKeys.has(subnet.resourceKey)) {
+          throw new Error(`Duplicate existing subnet key: ${subnet.resourceKey}`)
+        }
+        subnetKeys.add(subnet.resourceKey)
+      }
+
+      return {
+        ...resource,
+        resourceKey,
+        service,
+        region: resourceRegion,
+        vpcConfiguration: {
+          ...config,
+          mode: 'existing',
+          existingVpcId,
+          existingSubnets,
+          existingRouteTableId: String(config.existingRouteTableId || '').trim()
+        }
+      }
     }
 
     const ipv4Cidr = String(config.ipv4Cidr || '').trim()
@@ -181,14 +263,35 @@ function normalizeResources(resources, region) {
       )
     }
 
-    const subnets = allocateSubnets({
+    const submittedSubnetConfigurations = Array.isArray(config.subnets)
+      ? config.subnets
+      : []
+    const submittedAvailabilityZones = submittedSubnetConfigurations
+      .map((subnet) => String(subnet.availabilityZone || '').trim())
+      .filter(Boolean)
+    const availabilityZones = submittedAvailabilityZones.length
+      ? [...new Set(submittedAvailabilityZones)]
+      : getConfiguredAvailabilityZones(resourceRegion)
+
+    const allocatedSubnets = allocateSubnets({
       vpcCidr: ipv4Cidr,
       publicFirstCidr,
       publicQuantity,
       privateFirstCidr,
       privateQuantity,
-      region,
+      region: resourceRegion,
       availabilityZones
+    })
+
+    const subnets = allocatedSubnets.map((subnet, subnetIndex) => {
+      const selectedZone = String(submittedSubnetConfigurations[subnetIndex]?.availabilityZone || subnet.availabilityZone).trim()
+      if (!new RegExp(`^${resourceRegion}[a-z]$`).test(selectedZone)) {
+        throw new Error(`Subnet ${subnetIndex + 1} must use an Availability Zone in ${resourceRegion}.`)
+      }
+      return {
+        ...subnet,
+        availabilityZone: selectedZone
+      }
     })
 
     const natGatewayMode = config.natGatewayMode || 'none'
@@ -203,6 +306,7 @@ function normalizeResources(resources, region) {
       ...resource,
       resourceKey,
       service,
+      region: resourceRegion,
       vpcConfiguration: {
         ...config,
         mode: 'new',
@@ -235,6 +339,8 @@ function validateBomInput(body) {
     justification
   } = body
 
+  const fallbackRegion = String(region || '').trim()
+
   if (
     typeof projectName !== 'string' ||
     !projectName.trim() ||
@@ -245,23 +351,29 @@ function validateBomInput(body) {
       'Staging',
       'Production'
     ].includes(environment) ||
-    typeof region !== 'string' ||
-    !region.trim() ||
     !Array.isArray(resources) ||
     resources.length === 0 ||
     typeof justification !== 'string' ||
     !justification.trim()
   ) {
     throw new Error(
-      'Please provide a project name, valid environment, AWS region, at least one resource, and business justification.'
+      'Please provide a project name, valid environment, at least one resource, and business justification.'
     )
+  }
+
+  const normalizedResources = normalizeResources(resources, fallbackRegion)
+  const legacyRegion = fallbackRegion ||
+    normalizedResources.find((resource) => resource.region)?.region
+
+  if (!legacyRegion) {
+    throw new Error('Select an AWS Region for each VPC and EC2 resource.')
   }
 
   return {
     projectName: projectName.trim(),
     environment,
-    region: region.trim(),
-    resources: normalizeResources(resources, region.trim()),
+    region: legacyRegion,
+    resources: normalizedResources,
     justification: justification.trim()
   }
 }
@@ -366,6 +478,128 @@ router.get(
       return res.status(500).json({
         message: 'Failed to fetch BOMs'
       })
+    }
+  }
+)
+
+// =====================================================
+// USER AND CLOUD ENGINEER: EXPORT BOM CSV
+// =====================================================
+
+router.get(
+  '/:id/export.csv',
+  authMiddleware,
+  roleMiddleware('user', 'cloud_engineer'),
+  async (req, res) => {
+    try {
+      const bom = await BOM.findById(req.params.id)
+        .populate('reviewedBy', 'name')
+
+      if (!bom) {
+        return res.status(404).json({
+          message: 'BOM not found'
+        })
+      }
+
+      if (
+        req.user.role === 'user' &&
+        String(bom.createdBy) !== String(req.user.id)
+      ) {
+        return res.status(403).json({
+          message: 'You do not have permission to export this BOM.'
+        })
+      }
+
+      const csv = await buildBomCsv(bom)
+
+      const safeTicketId = String(bom.ticketId || 'BOM')
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+
+      const filename = `${safeTicketId}.csv`
+
+      res.setHeader(
+        'Content-Type',
+        'text/csv; charset=utf-8'
+      )
+
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`
+      )
+
+      res.setHeader(
+        'Cache-Control',
+        'no-store'
+      )
+
+      return res.send('\uFEFF' + csv)
+    } catch (error) {
+      console.error('BOM CSV export error:', error)
+
+      if (error.name === 'CastError') {
+        return res.status(400).json({
+          message: 'Invalid BOM ID'
+        })
+      }
+
+      return res.status(500).json({
+        message: 'Failed to export BOM CSV'
+      })
+    }
+  }
+)
+
+
+// =====================================================
+// USER AND CLOUD ENGINEER: EXPORT BOM EXCEL
+// =====================================================
+
+router.get(
+  '/:id/export.xlsx',
+  authMiddleware,
+  roleMiddleware('user', 'cloud_engineer'),
+  async (req, res) => {
+    try {
+      const bom = await BOM.findById(req.params.id)
+        .populate('reviewedBy', 'name')
+
+      if (!bom) {
+        return res.status(404).json({ message: 'BOM not found' })
+      }
+
+      if (
+        req.user.role === 'user' &&
+        String(bom.createdBy) !== String(req.user.id)
+      ) {
+        return res.status(403).json({
+          message: 'You do not have permission to export this BOM.'
+        })
+      }
+
+      const workbookBuffer = await buildBomXlsx(bom)
+      const safeTicketId = String(bom.ticketId || 'BOM')
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+      const filename = `${safeTicketId}.xlsx`
+
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      )
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`
+      )
+      res.setHeader('Cache-Control', 'no-store')
+
+      return res.send(Buffer.from(workbookBuffer))
+    } catch (error) {
+      console.error('BOM Excel export error:', error)
+
+      if (error.name === 'CastError') {
+        return res.status(400).json({ message: 'Invalid BOM ID' })
+      }
+
+      return res.status(500).json({ message: 'Failed to export BOM Excel file' })
     }
   }
 )

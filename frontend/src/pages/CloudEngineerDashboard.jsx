@@ -1,4 +1,3 @@
-
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import './CloudEngineerDashboard.css'
@@ -79,6 +78,52 @@ function CloudEngineerDashboard() {
       console.error(error)
       setMessage('Unable to connect to server')
       return []
+    }
+  }
+
+  // DOWNLOAD BOM CSV
+  const handleDownloadCsv = async (bom) => {
+    try {
+      setMessage(`Preparing CSV export for ${bom.ticketId || 'this BOM'}...`)
+
+      const response = await fetch(
+        `${API_URL}/api/bom/${bom._id}/export.csv`,
+        {
+          method: 'GET',
+          headers: getHeaders()
+        }
+      )
+
+      if (!response.ok) {
+        let errorMessage = 'Unable to download BOM CSV'
+
+        try {
+          const data = await response.json()
+          errorMessage = data.message || errorMessage
+        } catch (error) {
+          console.error('CSV export error response:', error)
+        }
+
+        throw new Error(errorMessage)
+      }
+
+      const csvBlob = await response.blob()
+      const downloadUrl = window.URL.createObjectURL(csvBlob)
+      const link = document.createElement('a')
+      const safeTicketId = String(bom.ticketId || bom._id)
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+
+      link.href = downloadUrl
+      link.download = `${safeTicketId}.csv`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(downloadUrl)
+
+      setMessage(`CSV exported successfully for ${bom.ticketId || 'the selected BOM'}.`)
+    } catch (error) {
+      console.error('BOM CSV download error:', error)
+      setMessage(error.message || 'Unable to download BOM CSV')
     }
   }
 
@@ -830,15 +875,24 @@ function CloudEngineerDashboard() {
                       </td>
 
                       <td>
-                        <button
-                          className="ce-view-btn"
-                          disabled={processing}
-                          onClick={() => handleViewBom(bom)}
-                        >
-                          {bom.status === 'Pending Review'
-                            ? 'View / Review'
-                            : 'View Details'}
-                        </button>
+                        <div className="ce-action-buttons">
+                          <button
+                            className="ce-view-btn"
+                            disabled={processing}
+                            onClick={() => handleViewBom(bom)}
+                          >
+                            {bom.status === 'Pending Review'
+                              ? 'View / Review'
+                              : 'View Details'}
+                          </button>
+
+                          <button
+                            className="ce-secondary-btn"
+                            onClick={() => handleDownloadCsv(bom)}
+                          >
+                            Download CSV
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

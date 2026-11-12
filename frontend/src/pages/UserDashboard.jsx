@@ -1,10 +1,14 @@
 
-
 import { useEffect, useRef, useState } from 'react'
 
 import { useNavigate } from 'react-router-dom'
 
 import './UserDashboard.css'
+
+import './ExistingSubnetButtons.css'
+import RouteTableBuilder from '../components/RouteTableBuilder'
+import BomCsvDownload from '../components/BomCsvDownload'
+import '../components/RouteTableBuilder.css'
 
 const API = 'http://localhost:5000'
 
@@ -19,6 +23,17 @@ const PROVIDERS = {
 }
 
 const CIDR_PREFIXES = Array.from({ length: 21 }, (_, index) => index + 8)
+
+const SUBNET_ADDRESS_OPTIONS = Array.from({ length: 13 }, (_, index) => {
+  const prefix = index + 16
+  const addresses = 2 ** (32 - prefix)
+
+  return {
+    prefix,
+    addresses,
+    label: new Intl.NumberFormat('en-US').format(addresses)
+  }
+})
 
 const EBS_TYPES = [
 
@@ -58,6 +73,8 @@ const newSubnet = (type = 'private', ipv4Cidr = '') => ({
 
   ipv4Cidr,
 
+  usableIpCount: 0,
+
   subnetType: type,
 
   mapPublicIpOnLaunch: false
@@ -70,13 +87,14 @@ const newVpc = () => ({
 
   service: 'VPC',
 
+  region: '',
+
   resourceName: '',
 
   vpcConfiguration: {
 
     mode: 'new',
 
-    creationExperience: 'vpc-only',
 
     name: '',
 
@@ -90,13 +108,27 @@ const newVpc = () => ({
 
     enableDnsHostnames: true,
 
-    subnets: [],
+    subnets: [
+      { ...newSubnet('public'), availabilityZone: 'ap-south-1a' },
+      { ...newSubnet('private'), availabilityZone: 'ap-south-1b' }
+    ],
+
+    subnetConfiguration: 'public-private',
 
     createInternetGateway: false,
 
     natGatewayMode: 'none',
 
-    existingVpcId: ''
+    existingVpcId: '',
+
+    existingVpcCidr: '',
+
+    existingSubnets: [{ resourceKey: newKey(), subnetId: '', subnetType: 'private', ipv4Cidr: '' }],
+
+    createdSubnets: [],
+
+    existingRouteTableId: '',
+    routeTables: []
 
   }
 
@@ -107,6 +139,8 @@ const newEc2 = () => ({
   resourceKey: newKey(),
 
   service: 'EC2',
+
+  region: '',
 
   resourceName: '',
 
@@ -154,7 +188,21 @@ const newEc2 = () => ({
 
       associatePublicIpAddress: false,
 
-      securityGroupIds: []
+      securityGroupMode: 'existing',
+
+      securityGroupIds: [],
+
+      securityGroup: {
+
+        name: '',
+
+        description: '',
+
+        ingressRules: [],
+
+        egressRules: []
+
+      }
 
     },
 
@@ -242,18 +290,63 @@ function intToIp(number) {
     .join('.')
 }
 
-function cidrForSubnet(vpcCidr, subnetIndex, prefix = 24) {
-  const vpc = parseCidr(vpcCidr)
-  if (!vpc) return `10.0.${subnetIndex + 1}.0/${prefix}`
-
-  const blockSize = 2 ** (32 - Number(prefix))
-  const start = (vpc.start + blockSize * (subnetIndex + 1)) >>> 0
-  const alignedStart = Math.floor(start / blockSize) * blockSize
-
-  return `${intToIp(alignedStart >>> 0)}/${prefix}`
+function ipv4AddressesForCidr(cidrValue) {
+  const cidr = parseCidr(cidrValue)
+  if (!cidr) return 0
+  return 2 ** (32 - cidr.prefix)
 }
 
-function validateResources(resources, region, instanceTypes) {
+function prefixForAddressCapacity(requiredAddresses, vpcPrefix) {
+  const requested = Number(requiredAddresses)
+  const minimumPrefix = Math.max(16, Number(vpcPrefix) || 16)
+
+  if (
+    !Number.isInteger(requested) ||
+    requested < 16 ||
+    requested > 65536 ||
+    minimumPrefix > 28
+  ) {
+    return null
+  }
+
+  for (let prefix = 28; prefix >= minimumPrefix; prefix -= 1) {
+    if (2 ** (32 - prefix) >= requested) return prefix
+  }
+
+  return null
+}
+
+function allocateSubnetCidr(vpcCidrValue, subnetList, prefix, excludeIndex = -1) {
+  const vpc = parseCidr(vpcCidrValue)
+  if (!vpc || !Number.isInteger(Number(prefix)) || Number(prefix) < vpc.prefix || Number(prefix) > 28) {
+    return ''
+  }
+
+  const blockSize = 2 ** (32 - Number(prefix))
+  const occupied = (subnetList || [])
+    .filter((_, index) => index !== excludeIndex)
+    .map((subnet) => parseCidr(subnet.ipv4Cidr))
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start)
+
+  let candidate = Math.ceil(vpc.start / blockSize) * blockSize
+
+  while (candidate + blockSize - 1 <= vpc.end) {
+    const conflict = occupied.find((item) =>
+      candidate <= item.end && item.start <= candidate + blockSize - 1
+    )
+
+    if (!conflict) {
+      return `${intToIp(candidate >>> 0)}/${prefix}`
+    }
+
+    candidate = Math.ceil((conflict.end + 1) / blockSize) * blockSize
+  }
+
+  return ''
+}
+
+function validateResources(resources, instanceTypes) {
 
   const keys = new Set()
 
@@ -279,6 +372,11 @@ function validateResources(resources, region, instanceTypes) {
 
     keys.add(resource.resourceKey)
 
+    const resourceRegion = String(resource.region || '').trim()
+    if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/.test(resourceRegion)) {
+      return `${label}: select a valid AWS Region.`
+    }
+
     if (resource.service !== 'VPC') continue
 
     const config = resource.vpcConfiguration
@@ -286,9 +384,119 @@ function validateResources(resources, region, instanceTypes) {
     if (config.mode === 'existing') {
 
       if (!awsId(config.existingVpcId, 'vpc')) {
-
         return `${label}: enter a valid existing VPC ID.`
+      }
 
+      if (!Array.isArray(config.existingSubnets) || config.existingSubnets.length === 0) {
+        return `${label}: add at least one existing subnet ID.`
+      }
+
+      const createdSubnetList = Array.isArray(config.createdSubnets)
+        ? config.createdSubnets
+        : []
+      const needsCidrValidation = createdSubnetList.length > 0
+      const existingVpcCidr = needsCidrValidation
+        ? parseCidr(config.existingVpcCidr)
+        : null
+
+      if (needsCidrValidation && (
+        !existingVpcCidr ||
+        existingVpcCidr.prefix < 16 ||
+        existingVpcCidr.prefix > 28
+      )) {
+        return `${label}: enter a valid existing VPC CIDR (/16 to /28) before creating new subnets.`
+      }
+
+      const occupiedCidrs = []
+
+      for (const [subnetIndex, subnet] of config.existingSubnets.entries()) {
+        if (!awsId(subnet.subnetId, 'subnet')) {
+          return `${label}: enter a valid subnet ID for existing subnet ${subnetIndex + 1}.`
+        }
+        if (!subnet.resourceKey) {
+          return `${label}: an existing subnet is missing its resource key.`
+        }
+        if (subnets.has(subnet.resourceKey)) {
+          return `${label}: duplicate existing subnet entry.`
+        }
+
+        if (needsCidrValidation) {
+          const existingCidr = parseCidr(subnet.ipv4Cidr)
+          if (
+            !existingCidr ||
+            existingCidr.prefix < existingVpcCidr.prefix ||
+            existingCidr.prefix > 28
+          ) {
+            return `${label}: enter a valid CIDR (/${existingVpcCidr.prefix} to /28) for existing subnet ${subnetIndex + 1}.`
+          }
+          if (
+            existingCidr.start < existingVpcCidr.start ||
+            existingCidr.end > existingVpcCidr.end
+          ) {
+            return `${label}: existing subnet ${subnetIndex + 1} CIDR must be inside the existing VPC CIDR.`
+          }
+          if (occupiedCidrs.some((other) =>
+            existingCidr.start <= other.end && other.start <= existingCidr.end
+          )) {
+            return `${label}: existing subnet ${subnetIndex + 1} CIDR overlaps another subnet.`
+          }
+          occupiedCidrs.push(existingCidr)
+        }
+
+        subnets.set(subnet.resourceKey, {
+          vpcKey: resource.resourceKey,
+          type: subnet.subnetType || 'private'
+        })
+      }
+
+      for (const [subnetIndex, subnet] of createdSubnetList.entries()) {
+        const subnetLabel = `${label}, new subnet ${subnetIndex + 1}`
+        const cidr = parseCidr(subnet.ipv4Cidr)
+
+        if (
+          !cidr ||
+          cidr.prefix < existingVpcCidr.prefix ||
+          cidr.prefix > 28
+        ) {
+          return `${subnetLabel}: enter a valid subnet CIDR within the existing VPC prefix range.`
+        }
+        if (
+          cidr.start < existingVpcCidr.start ||
+          cidr.end > existingVpcCidr.end
+        ) {
+          return `${subnetLabel}: CIDR must be inside the existing VPC.`
+        }
+        if (occupiedCidrs.some((other) =>
+          cidr.start <= other.end && other.start <= cidr.end
+        )) {
+          return `${subnetLabel}: subnet CIDR overlaps an existing or newly created subnet.`
+        }
+        occupiedCidrs.push(cidr)
+
+        if (!subnet.resourceKey) {
+          return `${subnetLabel}: subnet is missing its resource key.`
+        }
+        if (!String(subnet.name || '').trim()) {
+          return `${subnetLabel}: enter a subnet name.`
+        }
+        if (subnets.has(subnet.resourceKey)) {
+          return `${subnetLabel}: duplicate subnet entry.`
+        }
+        if (!['public', 'private'].includes(subnet.subnetType)) {
+          return `${subnetLabel}: select public or private subnet type.`
+        }
+        if (!new RegExp(`^${resourceRegion}[a-z]$`).test(subnet.availabilityZone || '')) {
+          return `${subnetLabel}: select an availability zone in ${resourceRegion}.`
+        }
+
+        subnets.set(subnet.resourceKey, {
+          vpcKey: resource.resourceKey,
+          type: subnet.subnetType
+        })
+      }
+
+      if (config.existingRouteTableId && !awsId(config.existingRouteTableId, 'rtb')) {
+        return `${label}: enter a valid existing route table ID or leave it blank.`
       }
 
       vpcs.set(resource.resourceKey, resource)
@@ -306,20 +514,7 @@ function validateResources(resources, region, instanceTypes) {
     }
 
     const subnetList = config.subnets || []
-
-    if (
-
-      config.creationExperience === 'vpc-only' &&
-
-      subnetList.length
-
-    ) {
-
-      return `${label}: VPC-only mode cannot include subnets.`
-
-    }
-
-    const previousCidrs = []
+const previousCidrs = []
 
     let hasPublicSubnet = false
 
@@ -329,9 +524,23 @@ function validateResources(resources, region, instanceTypes) {
 
       const cidr = parseCidr(subnet.ipv4Cidr)
 
-      if (!cidr || cidr.prefix < 16 || cidr.prefix > 28) {
+      if (!cidr || cidr.prefix < vpcCidr.prefix || cidr.prefix > 28) {
 
-        return `${subnetLabel}: enter a valid subnet CIDR.`
+        return `${subnetLabel}: enter a valid subnet CIDR within the VPC prefix range.`
+
+      }
+
+      const requestedAddresses = Number(
+        subnet.usableIpCount || ipv4AddressesForCidr(subnet.ipv4Cidr)
+      )
+
+      if (
+        !Number.isInteger(requestedAddresses) ||
+        requestedAddresses < 16 ||
+        requestedAddresses > ipv4AddressesForCidr(subnet.ipv4Cidr)
+      ) {
+
+        return `${subnetLabel}: select an IPv4 address requirement between 16 and the capacity of its selected CIDR.`
 
       }
 
@@ -361,7 +570,7 @@ function validateResources(resources, region, instanceTypes) {
 
       previousCidrs.push(cidr)
 
-      if (!new RegExp(`^${region}[a-z]$`).test(
+      if (!new RegExp(`^${resourceRegion}[a-z]$`).test(
 
         subnet.availabilityZone
 
@@ -393,22 +602,101 @@ function validateResources(resources, region, instanceTypes) {
 
     }
 
-    if (hasPublicSubnet && !config.createInternetGateway) {
+    const routeTables = Array.isArray(config.routeTables) ? config.routeTables : []
+    let hasInternetGatewayRoute = Boolean(config.createInternetGateway)
+    let hasNatGatewayRoute = config.natGatewayMode === 'single'
+    const routeTableIds = new Set()
+    const routeIds = new Set()
+    const associatedSubnetKeys = new Set()
+    const subnetByKey = new Map(subnetList.map((subnet) => [subnet.resourceKey, subnet]))
 
-      return `${label}: public subnets require an internet gateway.`
+    if (routeTables.length > 0) {
+      hasInternetGatewayRoute = false
+      hasNatGatewayRoute = false
 
+      for (const [tableIndex, table] of routeTables.entries()) {
+        const tableLabel = `${label}, route table ${tableIndex + 1}`
+        if (!table.id || routeTableIds.has(table.id)) {
+          return `${tableLabel}: missing or duplicate route table identifier.`
+        }
+        routeTableIds.add(table.id)
+
+        const destinations = new Set()
+        const routes = Array.isArray(table.routes) ? table.routes : []
+        for (const [routeIndex, route] of routes.entries()) {
+          const routeLabel = `${tableLabel}, route ${routeIndex + 1}`
+          if (!parseCidr(route.destinationCidr)) {
+            return `${routeLabel}: enter a valid destination IPv4 CIDR.`
+          }
+          if (destinations.has(route.destinationCidr)) {
+            return `${routeLabel}: duplicate destination CIDR in this route table.`
+          }
+          destinations.add(route.destinationCidr)
+
+          if (!route.id || routeIds.has(route.id)) {
+            return `${routeLabel}: missing or duplicate route identifier.`
+          }
+          routeIds.add(route.id)
+
+          const supportedTargets = [
+            'internet_gateway',
+            'nat_gateway',
+            'virtual_private_gateway',
+            'vpc_peering',
+            'transit_gateway',
+            'network_interface'
+          ]
+          if (!supportedTargets.includes(route.targetType)) {
+            return `${routeLabel}: select a supported route target.`
+          }
+
+          const externalTargetPrefixes = {
+            virtual_private_gateway: 'vgw',
+            vpc_peering: 'pcx',
+            transit_gateway: 'tgw',
+            network_interface: 'eni'
+          }
+          const requiredPrefix = externalTargetPrefixes[route.targetType]
+          if (requiredPrefix && !awsId(route.targetId, requiredPrefix)) {
+            return `${routeLabel}: enter a valid ${requiredPrefix.toUpperCase()} target ID.`
+          }
+
+          if (route.targetType === 'internet_gateway') hasInternetGatewayRoute = true
+          if (route.targetType === 'nat_gateway') hasNatGatewayRoute = true
+        }
+
+        for (const subnetKey of table.associatedSubnetKeys || []) {
+          if (!subnetByKey.has(subnetKey)) {
+            return `${tableLabel}: an associated subnet does not belong to this VPC.`
+          }
+          if (associatedSubnetKeys.has(subnetKey)) {
+            return `${tableLabel}: a subnet cannot be associated with multiple route tables.`
+          }
+          associatedSubnetKeys.add(subnetKey)
+        }
+      }
+
+      for (const [subnetIndex, subnet] of subnetList.entries()) {
+        if (subnet.subnetType !== 'public') continue
+        const associatedTable = routeTables.find((table) =>
+          (table.associatedSubnetKeys || []).includes(subnet.resourceKey)
+        )
+        const hasPublicDefaultRoute = (associatedTable?.routes || []).some(
+          (route) =>
+            route.destinationCidr === '0.0.0.0/0' &&
+            route.targetType === 'internet_gateway'
+        )
+        if (!hasPublicDefaultRoute) {
+          return `${label}, subnet ${subnetIndex + 1}: associate this public subnet with a route table containing a 0.0.0.0/0 Internet Gateway route.`
+        }
+      }
     }
 
-    if (
-
-      config.natGatewayMode === 'single' &&
-
-      (!hasPublicSubnet || !config.createInternetGateway)
-
-    ) {
-
-      return `${label}: NAT requires a public subnet and internet gateway.`
-
+    if (hasPublicSubnet && !hasInternetGatewayRoute) {
+      return `${label}: public subnets require an Internet Gateway route.`
+    }
+    if (hasNatGatewayRoute && (!hasPublicSubnet || !hasInternetGatewayRoute)) {
+      return `${label}: NAT requires a public subnet and an Internet Gateway route.`
     }
 
     vpcs.set(resource.resourceKey, resource)
@@ -424,6 +712,10 @@ function validateResources(resources, region, instanceTypes) {
     const config = resource.ec2Configuration
 
     const network = config.network
+    const ec2Region = String(resource.region || '').trim()
+    if (!/^[a-z]{2}(?:-gov)?-[a-z]+-\d+$/.test(ec2Region)) {
+      return `${label}: select a valid AWS Region.`
+    }
 
     if (!instanceTypes.some(
 
@@ -467,10 +759,12 @@ function validateResources(resources, region, instanceTypes) {
 
       const subnet = subnets.get(network.subnetResourceKey)
 
-      if (!vpc || vpc.vpcConfiguration.mode !== 'new') {
+      if (!vpc) {
+        return `${label}: select a VPC resource in this BOM.`
+      }
 
-        return `${label}: select a newly created VPC in this BOM.`
-
+      if (ec2Region !== vpc.region) {
+        return `${label}: EC2 must use the same AWS Region (${vpc.region}) as its selected BOM VPC.`
       }
 
       if (!subnet || subnet.vpcKey !== network.vpcResourceKey) {
@@ -507,9 +801,79 @@ function validateResources(resources, region, instanceTypes) {
 
     }
 
-    if (
+    if (network.securityGroupMode === 'new') {
 
-      network.securityGroupIds.some(
+      const securityGroup = network.securityGroup || {}
+
+      if (!/^[A-Za-z0-9._-]{1,255}$/.test(securityGroup.name || '')) {
+
+        return `${label}: enter a valid security group name (letters, numbers, dots, underscores or hyphens).`
+
+      }
+
+      if (!String(securityGroup.description || '').trim()) {
+
+        return `${label}: enter a security group description.`
+
+      }
+
+      for (const [direction, rules] of [
+
+        ['inbound', securityGroup.ingressRules || []],
+
+        ['outbound', securityGroup.egressRules || []]
+
+      ]) {
+
+        for (const [ruleIndex, rule] of rules.entries()) {
+
+          const ruleLabel = `${label}: ${direction} rule ${ruleIndex + 1}`
+
+          if (!rule.protocol || !String(rule.cidr || '').trim()) {
+
+            return `${ruleLabel}: select a protocol and enter a CIDR destination/source.`
+
+          }
+
+          if (rule.protocol === 'tcp' || rule.protocol === 'udp') {
+
+            const fromPort = Number(rule.fromPort)
+
+            const toPort = Number(rule.toPort)
+
+            if (
+
+              !Number.isInteger(fromPort) ||
+
+              !Number.isInteger(toPort) ||
+
+              fromPort < 1 ||
+
+              toPort > 65535 ||
+
+              fromPort > toPort
+
+            ) {
+
+              return `${ruleLabel}: enter a valid port range between 1 and 65535.`
+
+            }
+
+          }
+
+          if (!parseCidr(rule.cidr)) {
+
+            return `${ruleLabel}: enter a valid IPv4 CIDR.`
+
+          }
+
+        }
+
+      }
+
+    } else if (
+
+      (network.securityGroupIds || []).some(
 
         (id) => !awsId(id, 'sg')
 
@@ -587,17 +951,23 @@ function UserDashboard() {
 
   const [environment, setEnvironment] = useState('Development')
 
-  const [region, setRegion] = useState('')
-
   const [justification, setJustification] = useState('')
 
   const [regions, setRegions] = useState([])
+
+  const [availabilityZones, setAvailabilityZones] = useState([])
+
+  const [availabilityZonesLoading, setAvailabilityZonesLoading] = useState(false)
+
+  const [availabilityZonesError, setAvailabilityZonesError] = useState('')
 
   const [instanceTypes, setInstanceTypes] = useState([])
 
   const [masterDataLoading, setMasterDataLoading] = useState(false)
 
   const [resources, setResources] = useState([newBlankResource()])
+
+  const [addedResourceKeys, setAddedResourceKeys] = useState([])
 
   const [activeIndex, setActiveIndex] = useState(0)
 
@@ -621,9 +991,7 @@ function UserDashboard() {
 
     (item) =>
 
-      item.service === 'VPC' &&
-
-      item.vpcConfiguration?.mode === 'new'
+      item.service === 'VPC'
 
   )
 
@@ -637,9 +1005,28 @@ function UserDashboard() {
 
   )
 
-  const selectedSubnets =
+  const activeVpcRegion = isVpc
+    ? active?.region || ''
+    : isEc2 && active?.ec2Configuration?.network?.vpcSource === 'bom'
+      ? selectedVpc?.region || ''
+      : ''
 
-    selectedVpc?.vpcConfiguration?.subnets || []
+  const selectedSubnets = selectedVpc
+    ? selectedVpc.vpcConfiguration?.mode === 'existing'
+      ? [
+          ...(selectedVpc.vpcConfiguration.existingSubnets || []).map((subnet, index) => ({
+            resourceKey: subnet.resourceKey,
+            name: subnet.name || `Existing subnet ${index + 1}`,
+            subnetType: subnet.subnetType || 'private',
+            ipv4Cidr: subnet.ipv4Cidr || ''
+          })),
+          ...(selectedVpc.vpcConfiguration.createdSubnets || []).map((subnet, index) => ({
+            ...subnet,
+            name: subnet.name || `New subnet ${index + 1}`
+          }))
+        ]
+      : selectedVpc.vpcConfiguration?.subnets || []
+    : []
 
   const cpuOptions = [...new Set(
 
@@ -657,13 +1044,15 @@ function UserDashboard() {
 
   )].sort((a, b) => a - b)
 
-  const matchingInstances = instanceTypes.filter((item) =>
+  const filteredMatchingInstances = instanceTypes.filter((item) =>
 
     (!active?.cpu || Number(item.cpu) === Number(active.cpu)) &&
 
     (!active?.ram || Number(item.ram) === Number(active.ram))
 
   )
+
+  const matchingInstances = filteredMatchingInstances
 
   function updateActive(changes) {
 
@@ -693,6 +1082,21 @@ function UserDashboard() {
 
     })
 
+  }
+
+  function updateRouteTables(routeTables) {
+    const hasInternetGatewayRoute = routeTables.some((table) =>
+      (table.routes || []).some((route) => route.targetType === 'internet_gateway')
+    )
+    const hasNatGatewayRoute = routeTables.some((table) =>
+      (table.routes || []).some((route) => route.targetType === 'nat_gateway')
+    )
+
+    updateVpc({
+      routeTables,
+      createInternetGateway: hasInternetGatewayRoute,
+      natGatewayMode: hasNatGatewayRoute ? 'single' : 'none'
+    })
   }
 
   function updateEc2(changes) {
@@ -728,23 +1132,46 @@ function UserDashboard() {
   }
 
   function updateSubnet(index, changes) {
+    const currentSubnets = active.vpcConfiguration.subnets || []
+    const currentSubnet = currentSubnets[index]
+    let updatedSubnet = { ...currentSubnet, ...changes }
+
+    if (Object.prototype.hasOwnProperty.call(changes, 'usableIpCount')) {
+      const requested = changes.usableIpCount
+      const prefix = prefixForAddressCapacity(requested, parseCidr(active.vpcConfiguration.ipv4Cidr)?.prefix)
+
+      if (prefix) {
+        const ipv4Cidr = allocateSubnetCidr(
+          active.vpcConfiguration.ipv4Cidr,
+          currentSubnets,
+          prefix,
+          index
+        )
+        updatedSubnet = {
+          ...updatedSubnet,
+          ipv4Cidr
+        }
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(changes, 'ipv4Cidr')) {
+      updatedSubnet.usableIpCount = ipv4AddressesForCidr(changes.ipv4Cidr)
+    }
 
     updateVpc({
-
-      subnets: active.vpcConfiguration.subnets.map(
-
-        (item, itemIndex) =>
-
-          itemIndex === index
-
-            ? { ...item, ...changes }
-
-            : item
-
+      subnets: currentSubnets.map((item, itemIndex) =>
+        itemIndex === index ? updatedSubnet : item
       )
-
     })
+  }
 
+  function updateCreatedSubnet(index, changes) {
+    const currentSubnets = active.vpcConfiguration.createdSubnets || []
+    updateVpc({
+      createdSubnets: currentSubnets.map((subnet, subnetIndex) =>
+        subnetIndex === index ? { ...subnet, ...changes } : subnet
+      )
+    })
   }
 
   function selectService(service) {
@@ -803,6 +1230,7 @@ function UserDashboard() {
 
   }
 
+
   async function loadBoms() {
 
     try {
@@ -831,78 +1259,40 @@ function UserDashboard() {
 
   }
 
-  async function loadMasterData(
-
-    provider = 'aws',
-
-    selectedRegion = ''
-
-  ) {
-
+  async function loadMasterData(provider = 'aws') {
     setMasterDataLoading(true)
-
     try {
-
-      const categories = ['region', 'instanceType']
-
-      const results = await Promise.all(
-
-        categories.map(async (category) => {
-
-          const response = await fetch(
-
-            `${API}/api/master-data/category/${category}?cloudProvider=${provider}`,
-
-            { headers: authHeaders(), cache: 'no-store' }
-
-          )
-
-          const data = await response.json()
-
-          if (!response.ok) {
-
-            throw new Error(
-
-              data.message || 'Unable to load master data.'
-
-            )
-
-          }
-
-          return (data.masterData || []).filter(
-
-            (item) => item.cloudProvider === provider
-
-          )
-
+      const [regionsResponse, instanceResponse] = await Promise.all([
+        fetch(`${API}/api/master-data/regions`, {
+          headers: authHeaders(),
+          cache: 'no-store'
+        }),
+        fetch(`${API}/api/master-data/category/instanceType?cloudProvider=${provider}`, {
+          headers: authHeaders(),
+          cache: 'no-store'
         })
-
-      )
-
-      setRegions(results[0])
-
-      setInstanceTypes(results[1])
-
-      setRegion(
-
-        results[0].some((item) => item.value === selectedRegion)
-
-          ? selectedRegion
-
-          : results[0][0]?.value || ''
-
-      )
-
+      ])
+      const [regionsData, instanceData] = await Promise.all([
+        regionsResponse.json(),
+        instanceResponse.json()
+      ])
+      if (!instanceResponse.ok) {
+        throw new Error(instanceData.message || 'Unable to load EC2 instance types.')
+      }
+      setInstanceTypes((instanceData.masterData || []).filter(
+        (item) => item.cloudProvider === provider
+      ))
+      if (!regionsResponse.ok) {
+        setRegions([])
+        throw new Error(regionsData.message || 'Unable to load AWS Regions.')
+      }
+      setRegions(Array.isArray(regionsData.regions) ? regionsData.regions : [])
     } catch (error) {
-
       setMessage(error.message)
-
+      setRegions([])
     } finally {
-
       setMasterDataLoading(false)
-
     }
-
   }
 
   useEffect(() => {
@@ -968,6 +1358,44 @@ function UserDashboard() {
   }, [])
 
   useEffect(() => {
+    if (!showForm || cloudProvider !== 'aws' || !activeVpcRegion) {
+      setAvailabilityZones([])
+      setAvailabilityZonesError('')
+      setAvailabilityZonesLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    async function loadAvailabilityZones() {
+      setAvailabilityZonesLoading(true)
+      setAvailabilityZonesError('')
+      try {
+        const response = await fetch(
+          `${API}/api/master-data/availability-zones?region=${encodeURIComponent(activeVpcRegion)}`,
+          {
+            headers: authHeaders(),
+            cache: 'no-store',
+            signal: controller.signal
+          }
+        )
+        const data = await response.json()
+        if (!response.ok) {
+          throw new Error(data.message || 'Unable to load AWS Availability Zones.')
+        }
+        setAvailabilityZones(Array.isArray(data.availabilityZones) ? data.availabilityZones : [])
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          setAvailabilityZones([])
+          setAvailabilityZonesError(error.message || 'Unable to load AWS Availability Zones.')
+        }
+      } finally {
+        if (!controller.signal.aborted) setAvailabilityZonesLoading(false)
+      }
+    }
+    loadAvailabilityZones()
+    return () => controller.abort()
+  }, [showForm, cloudProvider, activeVpcRegion])
+
+  useEffect(() => {
 
     const requestId = ++pricingRequest.current
 
@@ -977,7 +1405,7 @@ function UserDashboard() {
 
       !isEc2 ||
 
-      !region ||
+      !(active?.region || (active?.ec2Configuration?.network?.vpcSource === 'bom' ? selectedVpc?.region : '')) ||
 
       !active.instanceType
 
@@ -1031,7 +1459,7 @@ function UserDashboard() {
 
               cloudProvider,
 
-              region,
+              region: active.region || (active.ec2Configuration?.network?.vpcSource === 'bom' ? selectedVpc?.region : ''),
 
               instanceType: active.instanceType,
 
@@ -1117,7 +1545,9 @@ function UserDashboard() {
 
     active?.storageType,
 
-    region,
+    active?.region,
+
+    selectedVpc?.region,
 
     cloudProvider
 
@@ -1134,6 +1564,8 @@ function UserDashboard() {
     setJustification('')
 
     setResources([newBlankResource()])
+
+    setAddedResourceKeys([])
 
     setActiveIndex(0)
 
@@ -1173,11 +1605,34 @@ function UserDashboard() {
 
             ...resource,
 
+            region: resource.region || bom.region || '',
+
             vpcConfiguration: {
 
               ...defaults.vpcConfiguration,
 
-              ...resource.vpcConfiguration
+              ...resource.vpcConfiguration,
+
+              routeTables: (resource.vpcConfiguration?.routeTables || []).map((table) => ({
+                ...table,
+                routes: (table.routes || []).map((route) => ({ ...route })),
+                associatedSubnetKeys: [...(table.associatedSubnetKeys || [])]
+              })),
+
+              subnets: (resource.vpcConfiguration?.subnets || defaults.vpcConfiguration.subnets).map((subnet) => ({
+                ...subnet,
+                usableIpCount: subnet.usableIpCount ?? 0
+              })),
+
+              existingSubnets: (resource.vpcConfiguration?.existingSubnets || defaults.vpcConfiguration.existingSubnets).map((subnet) => ({
+                ...subnet,
+                ipv4Cidr: subnet.ipv4Cidr || ''
+              })),
+
+              createdSubnets: (resource.vpcConfiguration?.createdSubnets || []).map((subnet) => ({
+                ...subnet,
+                usableIpCount: subnet.usableIpCount ?? 0
+              }))
 
             }
 
@@ -1194,6 +1649,8 @@ function UserDashboard() {
             ...defaults,
 
             ...resource,
+
+            region: resource.region || bom.region || '',
 
             ec2Configuration: {
 
@@ -1239,11 +1696,15 @@ function UserDashboard() {
 
     )
 
+    setAddedResourceKeys(savedResources.map((resource) => resource.resourceKey))
+
+    setActiveIndex(-1)
+
     setEditingBomId(bom._id)
 
     setShowForm(true)
 
-    await loadMasterData(bom.cloudProvider || 'aws', bom.region)
+    await loadMasterData(bom.cloudProvider || 'aws')
 
     window.scrollTo({ top: 0, behavior: 'smooth' })
 
@@ -1259,11 +1720,15 @@ function UserDashboard() {
 
       environment,
 
-      region,
+      region: resources.find((item) =>
+        addedResourceKeys.includes(item.resourceKey) &&
+        ['VPC', 'EC2'].includes(item.service) &&
+        item.region
+      )?.region || '',
 
       justification: justification.trim(),
 
-      resources: resources.map((item) => {
+      resources: resources.filter((item) => addedResourceKeys.includes(item.resourceKey) && ['VPC', 'EC2'].includes(item.service)).map((item) => {
 
         if (item.service === 'VPC') {
 
@@ -1271,7 +1736,9 @@ function UserDashboard() {
 
             resourceKey: item.resourceKey,
 
-            resourceName: item.resourceName,
+            region: item.region,
+
+            resourceName: item.vpcConfiguration?.name || item.vpcConfiguration?.existingVpcId || item.resourceName || 'VPC',
 
             service: 'VPC',
 
@@ -1290,6 +1757,10 @@ function UserDashboard() {
         return {
 
           resourceKey: item.resourceKey,
+
+          region: item.region || (item.ec2Configuration?.network?.vpcSource === 'bom'
+            ? resources.find((candidate) => candidate.resourceKey === item.ec2Configuration.network.vpcResourceKey)?.region
+            : ''),
 
           resourceName: item.resourceName,
 
@@ -1342,115 +1813,76 @@ function UserDashboard() {
   }
 
   async function handleSubmit(event) {
-
     event.preventDefault()
-
     if (submitting) return
-
-    if (cloudProvider !== 'aws') {
-
-      setMessage('Only AWS BOM submission is enabled.')
-
-      return
-
-    }
-
-    if (!projectName.trim() || !region || !justification.trim()) {
-
-      setMessage('Complete the project information.')
-
-      return
-
-    }
-
-    const validationError = validateResources(
-
-      resources,
-
-      region,
-
-      instanceTypes
-
-    )
-
-    if (validationError) {
-
-      setMessage(validationError)
-
-      return
-
-    }
-
-    setSubmitting(true)
 
     setMessage('')
 
     try {
+      if (cloudProvider !== 'aws') {
+        throw new Error('Only AWS BOM submission is enabled.')
+      }
 
+      const missingProjectInformation = []
+      if (!projectName.trim()) missingProjectInformation.push('Project Name')
+      if (!justification.trim()) missingProjectInformation.push('Justification')
+
+      if (missingProjectInformation.length > 0) {
+        throw new Error(`Please complete the following required field${missingProjectInformation.length > 1 ? 's' : ''}: ${missingProjectInformation.join(', ')}.`)
+      }
+
+      const configuredResources = resources.filter(
+        (item) => addedResourceKeys.includes(item.resourceKey) && ['VPC', 'EC2'].includes(item.service)
+      )
+
+      if (configuredResources.length === 0) {
+        throw new Error('Add at least one configured VPC or EC2 resource before submitting the BOM.')
+      }
+
+      const validationError = validateResources(
+        configuredResources,
+        instanceTypes
+      )
+
+      if (validationError) {
+        throw new Error(validationError)
+      }
+
+      setSubmitting(true)
       const editing = Boolean(editingBomId)
-
       const response = await fetch(
-
         editing
-
           ? `${API}/api/bom/${editingBomId}/resubmit`
-
           : `${API}/api/bom`,
-
         {
-
           method: editing ? 'PUT' : 'POST',
-
           headers: {
-
             ...authHeaders(),
-
             'Content-Type': 'application/json'
-
           },
-
           body: JSON.stringify(buildPayload())
-
         }
-
       )
 
       const data = await response.json()
-
       if (!response.ok) {
-
         throw new Error(data.message || 'BOM submission failed.')
-
       }
 
       const ticketId = data.bom?.ticketId
-
       resetForm()
-
       setShowForm(false)
-
       await loadBoms()
-
       setMessage(
-
         editing
-
           ? 'BOM updated and resubmitted successfully.'
-
-          : `BOM submitted successfully. Ticket: ${ticketId}`
-
+          : `BOM submitted successfully. Ticket: ${ticketId || 'created'}`
       )
-
     } catch (error) {
-
-      setMessage(error.message)
-
+      setMessage(error?.message || 'BOM submission failed. Check that the backend is running and try again.')
     } finally {
-
       setSubmitting(false)
-
     }
-
   }
 
   function renderVpcForm() {
@@ -1469,22 +1901,33 @@ function UserDashboard() {
 
         <div className="user-form-grid">
 
-          <Field label="VPC Resource Name">
-
-            <input
-
-              value={active.resourceName}
-
-              onChange={(e) =>
-
-                updateActive({ resourceName: e.target.value })
-
-              }
-
-              placeholder="production-network"
-
-            />
-
+          <Field label="AWS Region *">
+            <select
+              value={active.region || ''}
+              onChange={(e) => updateActive({
+                region: e.target.value,
+                vpcConfiguration: {
+                  ...active.vpcConfiguration,
+                  subnets: (active.vpcConfiguration.subnets || []).map((subnet) => ({
+                    ...subnet,
+                    availabilityZone: ''
+                  })),
+                  createdSubnets: (active.vpcConfiguration.createdSubnets || []).map((subnet) => ({
+                    ...subnet,
+                    availabilityZone: ''
+                  }))
+                }
+              })}
+              disabled={masterDataLoading}
+              required
+            >
+              <option value="">Select AWS Region</option>
+              {regions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.name} ({item.value})
+                </option>
+              ))}
+            </select>
           </Field>
 
           <Field label="VPC Option">
@@ -1511,59 +1954,257 @@ function UserDashboard() {
 
           {config.mode === 'existing' ? (
 
-            <Field label="Existing VPC ID *">
+            <>
+              <Field label="Existing VPC ID *">
+                <input
+                  value={config.existingVpcId}
+                  onChange={(e) => updateVpc({ existingVpcId: e.target.value })}
+                  placeholder="vpc-0123456789abcdef0"
+                />
+              </Field>
+              <Field label="Existing VPC CIDR * (Required when creating new subnets)">
+                <input
+                  value={config.existingVpcCidr || ''}
+                  onChange={(e) => updateVpc({ existingVpcCidr: e.target.value })}
+                  placeholder="10.0.0.0/16"
+                />
+                <small>Enter the IPv4 CIDR assigned to the existing VPC so new subnet ranges can be validated.</small>
+              </Field>
+              <Field label="Existing Route Table ID (Optional)">
+                <input
+                  value={config.existingRouteTableId || ''}
+                  onChange={(e) => updateVpc({ existingRouteTableId: e.target.value })}
+                  placeholder="rtb-0123456789abcdef0"
+                />
+              </Field>
+              <div className="user-form-field existing-subnets-section" style={{ gridColumn: '1 / -1' }}>
+                <label>Existing Subnets *</label>
 
-              <input
+                <div className="existing-subnets-list">
+                  {(config.existingSubnets || []).map((subnet, index) => (
+                    <div className="existing-subnet-item" key={subnet.resourceKey || index}>
+                      <div className="user-form-grid">
+                        <Field label={`Subnet ${index + 1} ID *`}>
+                          <input
+                            value={subnet.subnetId || ''}
+                            onChange={(e) => updateVpc({
+                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, subnetId: e.target.value } : item
+                              )
+                            })}
+                            placeholder="subnet-0123456789abcdef0"
+                          />
+                        </Field>
 
-                value={config.existingVpcId}
+                        <Field label={`Subnet ${index + 1} CIDR * (Required when creating new subnets)`}>
+                          <input
+                            value={subnet.ipv4Cidr || ''}
+                            onChange={(e) => updateVpc({
+                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, ipv4Cidr: e.target.value } : item
+                              )
+                            })}
+                            placeholder="10.0.1.0/24"
+                          />
+                        </Field>
 
-                onChange={(e) =>
+                        <Field label="Subnet Type">
+                          <select
+                            value={subnet.subnetType || 'private'}
+                            onChange={(e) => updateVpc({
+                              existingSubnets: (config.existingSubnets || []).map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, subnetType: e.target.value } : item
+                              )
+                            })}
+                          >
+                            <option value="private">Private</option>
+                            <option value="public">Public</option>
+                          </select>
+                        </Field>
+                      </div>
 
-                  updateVpc({ existingVpcId: e.target.value })
+                      <div className="existing-subnet-item-actions">
+                        <button
+                          type="button"
+                          className="existing-subnet-remove"
+                          onClick={() => updateVpc({
+                            existingSubnets: (config.existingSubnets || []).filter(
+                              (_, itemIndex) => itemIndex !== index
+                            )
+                          })}
+                        >
+                          <span className="existing-subnet-button-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M3 6h18" />
+                              <path d="M8 6V4h8v2" />
+                              <path d="m19 6-1 14H6L5 6" />
+                              <path d="M10 11v5M14 11v5" />
+                            </svg>
+                          </span>
+                          Remove subnet
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
 
-                }
+                <button
+                  type="button"
+                  className="existing-subnet-add"
+                  onClick={() => updateVpc({
+                    existingSubnets: [
+                      ...(config.existingSubnets || []),
+                      { resourceKey: newKey(), subnetId: '', subnetType: 'private', ipv4Cidr: '' }
+                    ]
+                  })}
+                >
+                  <span className="existing-subnet-button-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </span>
+                  Add existing subnet
+                </button>
+              </div>
 
-                placeholder="vpc-0123456789abcdef0"
+              <div className="user-form-field existing-subnets-section" style={{ gridColumn: '1 / -1' }}>
+                <label>Create New Subnets Inside This VPC</label>
+                <p>
+                  These subnets will be created by Terraform inside the existing VPC. Enter CIDRs that are inside the VPC and do not overlap with any existing subnet. They will use the VPC's existing main route table by default.
+                </p>
 
-              />
+                <div className="existing-subnets-list">
+                  {(config.createdSubnets || []).map((subnet, index) => (
+                    <div className="existing-subnet-item" key={subnet.resourceKey || index}>
+                      <div className="user-form-grid">
+                        <Field label={`New Subnet ${index + 1} Name *`}>
+                          <input
+                            value={subnet.name || ''}
+                            onChange={(e) => updateCreatedSubnet(index, { name: e.target.value })}
+                            placeholder="app-private-subnet"
+                          />
+                        </Field>
 
-            </Field>
+                        <Field label={`New Subnet ${index + 1} CIDR *`}>
+                          <input
+                            value={subnet.ipv4Cidr || ''}
+                            onChange={(e) => updateCreatedSubnet(index, { ipv4Cidr: e.target.value })}
+                            placeholder="10.0.3.0/24"
+                          />
+                        </Field>
+
+                        <Field label="Subnet Type *">
+                          <select
+                            value={subnet.subnetType || 'private'}
+                            onChange={(e) => updateCreatedSubnet(index, {
+                              subnetType: e.target.value,
+                              mapPublicIpOnLaunch: e.target.value === 'public' ? subnet.mapPublicIpOnLaunch === true : false
+                            })}
+                          >
+                            <option value="public">Public</option>
+                            <option value="private">Private</option>
+                          </select>
+                        </Field>
+
+                        <Field label="Availability Zone *">
+                          <select
+                            value={subnet.availabilityZone || ''}
+                            onChange={(e) => updateCreatedSubnet(index, { availabilityZone: e.target.value })}
+                            disabled={availabilityZonesLoading || availabilityZones.length === 0}
+                          >
+                            <option value="">
+                              {availabilityZonesLoading
+                                ? 'Loading Availability Zones...'
+                                : availabilityZones.length
+                                  ? 'Select Availability Zone'
+                                  : 'No Availability Zones available'}
+                            </option>
+                            {subnet.availabilityZone &&
+                              !availabilityZones.some((zone) => zone.zoneName === subnet.availabilityZone) && (
+                                <option value={subnet.availabilityZone}>
+                                  {subnet.availabilityZone} (saved value)
+                                </option>
+                              )}
+                            {availabilityZones.map((zone) => (
+                              <option key={zone.zoneName} value={zone.zoneName}>
+                                {zone.zoneName}
+                              </option>
+                            ))}
+                          </select>
+                          {availabilityZonesError ? (
+                            <small style={{ color: '#b91c1c' }}>{availabilityZonesError}</small>
+                          ) : null}
+                        </Field>
+
+                        {subnet.subnetType === 'public' && (
+                          <Field label="Assign Public IPv4 on Launch">
+                            <select
+                              value={subnet.mapPublicIpOnLaunch ? 'yes' : 'no'}
+                              onChange={(e) => updateCreatedSubnet(index, {
+                                mapPublicIpOnLaunch: e.target.value === 'yes'
+                              })}
+                            >
+                              <option value="no">No</option>
+                              <option value="yes">Yes</option>
+                            </select>
+                          </Field>
+                        )}
+                      </div>
+
+                      <div className="existing-subnet-item-actions">
+                        <button
+                          type="button"
+                          className="existing-subnet-remove"
+                          onClick={() => updateVpc({
+                            createdSubnets: (config.createdSubnets || []).filter((_, subnetIndex) => subnetIndex !== index)
+                          })}
+                        >
+                          <span className="existing-subnet-button-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M3 6h18" />
+                              <path d="M8 6V4h8v2" />
+                              <path d="m19 6-1 14H6L5 6" />
+                              <path d="M10 11v5M14 11v5" />
+                            </svg>
+                          </span>
+                          Remove new subnet
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  className="existing-subnet-add"
+                  onClick={() => updateVpc({
+                    createdSubnets: [
+                      ...(config.createdSubnets || []),
+                      newSubnet('private')
+                    ]
+                  })}
+                >
+                  <span className="existing-subnet-button-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                  </span>
+                  Add new subnet
+                </button>
+              </div>
+
+              <div style={{ gridColumn: '1 / -1' }}>
+                <RouteTableBuilder
+                  routeTables={config.routeTables || []}
+                  subnets={config.existingSubnets || []}
+                  onChange={updateRouteTables}
+                />
+              </div>
+            </>
 
           ) : (
 
             <>
-
-              <Field label="Creation Experience">
-
-                <select
-
-                  value={config.creationExperience}
-
-                  onChange={(e) =>
-
-                    updateVpc({
-
-                      creationExperience: e.target.value,
-
-                      subnets: [],
-
-                      createInternetGateway: false,
-
-                      natGatewayMode: 'none'
-
-                    })
-
-                  }
-
-                >
-
-                  <option value="vpc-only">VPC Only</option>
-
-                  <option value="vpc-and-more">VPC and More</option>
-
-                </select>
-
-              </Field>
 
               <Field label="VPC Name">
 
@@ -1620,9 +2261,7 @@ function UserDashboard() {
 
         </div>
 
-        {config.mode === 'new' &&
-
-          config.creationExperience === 'vpc-and-more' && (
+        {config.mode === 'new' && (
 
           <>
 
@@ -1634,11 +2273,155 @@ function UserDashboard() {
 
             <p>
 
-              Create one or more subnets. Each subnet must have a
+              Choose how many subnets to create and how they should be configured.
 
-              non-overlapping CIDR within the VPC.
+              Each subnet must have a non-overlapping CIDR within the VPC.
 
             </p>
+
+            <div className="user-form-grid">
+
+              <Field label="Number of subnets">
+
+                <select
+
+                  value={String(config.subnets.length || 2)}
+
+                  onChange={(e) => {
+
+                    const count = Number(e.target.value)
+
+                    const currentMode = config.subnetConfiguration || (config.subnets.some((subnet) => subnet.subnetType === 'public') &&
+
+                      config.subnets.some((subnet) => subnet.subnetType === 'private')
+
+                      ? 'public-private'
+
+                      : config.subnets.every((subnet) => subnet.subnetType === 'public')
+
+                        ? 'public'
+
+                        : 'private')
+
+                    const nextSubnets = Array.from({ length: count }, (_, index) => {
+
+                      const existing = config.subnets[index]
+
+                      const subnetType = currentMode === 'public'
+
+                        ? 'public'
+
+                        : currentMode === 'private'
+
+                          ? 'private'
+
+                          : index % 2 === 0 ? 'public' : 'private'
+
+                      return existing
+
+                        ? { ...existing, subnetType }
+
+                        : {
+
+                            ...newSubnet(subnetType),
+
+                            availabilityZone: availabilityZones[index % (availabilityZones.length || 1)]?.zoneName || ''
+
+                          }
+
+                    })
+
+                    updateVpc({
+
+                      subnetConfiguration: currentMode,
+
+                      subnets: nextSubnets,
+
+                      createInternetGateway: currentMode !== 'private' || config.createInternetGateway
+
+                    })
+
+                  }}
+
+                >
+
+                  {[1, 2, 3, 4].map((count) => (
+
+                    <option key={count} value={count}>{count}</option>
+
+                  ))}
+
+                </select>
+
+              </Field>
+
+              <Field label="Subnet configuration">
+
+                <select
+
+                  value={config.subnetConfiguration || (config.subnets.length && config.subnets.every((subnet) => subnet.subnetType === 'public')
+
+                    ? 'public'
+
+                    : config.subnets.length && config.subnets.every((subnet) => subnet.subnetType === 'private')
+
+                      ? 'private'
+
+                      : 'public-private')}
+
+                  onChange={(e) => {
+
+                    const mode = e.target.value
+
+                    updateVpc({
+
+                      subnetConfiguration: mode,
+
+                      subnets: config.subnets.map((subnet, index) => ({
+
+                        ...subnet,
+
+                        subnetType: mode === 'public'
+
+                          ? 'public'
+
+                          : mode === 'private'
+
+                            ? 'private'
+
+                            : index % 2 === 0 ? 'public' : 'private',
+
+                        mapPublicIpOnLaunch: false
+
+                      })),
+
+                      createInternetGateway: mode !== 'private' || config.createInternetGateway,
+
+                      natGatewayMode: mode === 'private' ? 'none' : config.natGatewayMode
+
+                    })
+
+                  }}
+
+                >
+
+                  <option value="public-private">Public and private subnets</option>
+
+                  <option value="public">All public subnets</option>
+
+                  <option value="private">All private subnets</option>
+
+                </select>
+
+              </Field>
+
+            </div>
+
+            <div className="user-form-section-title">
+
+              Subnet details ({config.subnets.length})
+
+            </div>
 
             {config.subnets.map((subnet, index) => (
 
@@ -1684,27 +2467,41 @@ function UserDashboard() {
 
                       value={subnet.subnetType}
 
-                      onChange={(e) =>
+                      onChange={(e) => {
 
-                        updateSubnet(index, {
+                        const subnetType = e.target.value
 
-                          subnetType: e.target.value,
+                        const nextSubnets = config.subnets.map((item, itemIndex) =>
 
-                          mapPublicIpOnLaunch: false,
+                          itemIndex === index
 
-                          ipv4Cidr: subnet.ipv4Cidr || cidrForSubnet(
+                            ? { ...item, subnetType, mapPublicIpOnLaunch: false }
 
-                            config.ipv4Cidr,
+                            : item
 
-                            index,
+                        )
 
-                            24
+                        const hasPublicSubnet = nextSubnets.some((item) => item.subnetType === 'public')
 
-                          )
+                        const hasPrivateSubnet = nextSubnets.some((item) => item.subnetType === 'private')
+
+                        updateVpc({
+
+                          subnets: nextSubnets,
+
+                          subnetConfiguration: hasPublicSubnet && hasPrivateSubnet
+
+                            ? 'public-private'
+
+                            : hasPublicSubnet ? 'public' : 'private',
+
+                          createInternetGateway: hasPublicSubnet || config.createInternetGateway,
+
+                          natGatewayMode: hasPublicSubnet ? config.natGatewayMode : 'none'
 
                         })
 
-                      }
+                      }}
 
                     >
 
@@ -1718,63 +2515,107 @@ function UserDashboard() {
 
                   <Field label="Availability Zone *">
 
-                    <input
-
-                      value={subnet.availabilityZone}
-
+                    <select
+                      value={subnet.availabilityZone || ''}
                       onChange={(e) =>
-
                         updateSubnet(index, {
-
                           availabilityZone: e.target.value
-
                         })
-
                       }
-
-                      placeholder={`${region || 'ap-south-1'}a`}
-
-                    />
+                      disabled={availabilityZonesLoading || availabilityZones.length === 0}
+                      required
+                    >
+                      <option value="">
+                        {availabilityZonesLoading
+                          ? 'Loading Availability Zones...'
+                          : availabilityZones.length
+                            ? 'Select Availability Zone'
+                            : 'No Availability Zones available'}
+                      </option>
+                      {subnet.availabilityZone &&
+                        !availabilityZones.some((zone) => zone.zoneName === subnet.availabilityZone) && (
+                          <option value={subnet.availabilityZone}>
+                            {subnet.availabilityZone} (saved value)
+                          </option>
+                        )}
+                      {availabilityZones.map((zone) => (
+                        <option key={zone.zoneName} value={zone.zoneName}>
+                          {zone.zoneName}
+                        </option>
+                      ))}
+                    </select>
+                    {availabilityZonesError ? (
+                      <small style={{ color: '#b91c1c' }}>{availabilityZonesError}</small>
+                    ) : (
+                      <small>
+                        Development catalogue only. These are sample zone names, not live AWS account availability.
+                      </small>
+                    )}
 
                   </Field>
 
-                                    <Field label="Subnet CIDR Prefix *">
+                  <Field label="Required IPv4 Address Capacity *">
 
                     <select
-
-                      value={String(subnet.ipv4Cidr || '10.0.1.0/24').split('/')[1] || '24'}
-
+                      value={String(
+                        subnet.ipv4Cidr
+                          ? ipv4AddressesForCidr(subnet.ipv4Cidr)
+                          : subnet.usableIpCount || ''
+                      )}
                       onChange={(e) =>
-
                         updateSubnet(index, {
-
-                          ipv4Cidr: cidrForSubnet(
-
-                            config.ipv4Cidr,
-
-                            index,
-
-                            Number(e.target.value)
-
-                          )
-
+                          usableIpCount: e.target.value
                         })
-
                       }
-
                       required
-
                     >
-
-                      {CIDR_PREFIXES.map((prefix) => (
-
-                        <option key={prefix} value={prefix}>/{prefix}</option>
-
-                      ))}
-
+                      <option value="">Select address capacity</option>
+                      {SUBNET_ADDRESS_OPTIONS
+                        .filter((option) =>
+                          option.prefix >= (parseCidr(config.ipv4Cidr)?.prefix || 16)
+                        )
+                        .map((option) => (
+                          <option key={option.prefix} value={option.addresses}>
+                            {option.label}
+                          </option>
+                        ))}
                     </select>
 
-                    <small>Subnet network address is generated automatically. AWS subnets support /16 through /28.</small>
+                    <small>
+                      Select the total IPv4 address capacity. CIDR sizing uses the full block size; AWS still reserves 5 addresses when the subnet is created.
+                    </small>
+
+                  </Field>
+
+                  <Field label="Subnet CIDR Prefix *">
+
+                    <select
+                      value={String(subnet.ipv4Cidr || '').split('/')[1] || ''}
+                      onChange={(e) => {
+                        const prefix = Number(e.target.value)
+                        const ipv4Cidr = allocateSubnetCidr(
+                          config.ipv4Cidr,
+                          config.subnets,
+                          prefix,
+                          index
+                        )
+                        updateSubnet(index, { ipv4Cidr })
+                      }}
+                      required
+                    >
+                      <option value="">Select CIDR Prefix</option>
+                      {CIDR_PREFIXES
+                        .filter((prefix) => prefix >= (parseCidr(config.ipv4Cidr)?.prefix || 16))
+                        .map((prefix) => (
+                          <option key={prefix} value={prefix}>/{prefix}</option>
+                        ))}
+                    </select>
+
+                    <small>
+                      Allocated CIDR: {subnet.ipv4Cidr || 'No available CIDR block'}
+                      {' · '}
+                      {subnet.ipv4Cidr ? `${new Intl.NumberFormat('en-US').format(ipv4AddressesForCidr(subnet.ipv4Cidr))} total IPv4 addresses` : 'IPv4 capacity unavailable'}
+                    </small>
 
                   </Field>
 
@@ -1816,69 +2657,9 @@ function UserDashboard() {
 
                 </div>
 
-                <button
-
-                  type="button"
-
-                  className="user-secondary-btn"
-
-                  onClick={() =>
-
-                    updateVpc({
-
-                      subnets: config.subnets.filter(
-
-                        (_, itemIndex) => itemIndex !== index
-
-                      )
-
-                    })
-
-                  }
-
-                >
-
-                  Remove Subnet
-
-                </button>
-
               </div>
 
             ))}
-
-            <button
-
-              type="button"
-
-              className="user-secondary-btn"
-
-              onClick={() =>
-
-                updateVpc({
-
-                  subnets: [
-
-                    ...config.subnets,
-
-                    newSubnet(
-
-                      'private',
-
-                      cidrForSubnet(config.ipv4Cidr, config.subnets.length, 24)
-
-                    )
-
-                  ]
-
-                })
-
-              }
-
-            >
-
-              + Add Subnet
-
-            </button>
 
             <div
 
@@ -1893,6 +2674,7 @@ function UserDashboard() {
                 <select
 
                   value={String(config.createInternetGateway)}
+                  disabled={(config.routeTables || []).length > 0}
 
                   onChange={(e) =>
 
@@ -1923,6 +2705,7 @@ function UserDashboard() {
                 <select
 
                   value={config.natGatewayMode}
+                  disabled={!config.createInternetGateway || (config.routeTables || []).length > 0}
 
                   onChange={(e) =>
 
@@ -1960,6 +2743,21 @@ function UserDashboard() {
 
         )}
 
+        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="user-primary-btn"
+            onClick={() => {
+              setAddedResourceKeys((previous) =>
+                previous.includes(active.resourceKey) ? previous : [...previous, active.resourceKey]
+              )
+              setActiveIndex(-1)
+            }}
+          >
+            Save & Collapse Resource
+          </button>
+        </div>
+
       </>
 
     )
@@ -1984,6 +2782,25 @@ function UserDashboard() {
 
         <div className="user-form-grid">
 
+          <Field label="AWS Region *">
+            <select
+              value={active.region || (network.vpcSource === 'bom' ? selectedVpc?.region || '' : '')}
+              onChange={(e) => updateActive({ region: e.target.value })}
+              disabled={masterDataLoading || network.vpcSource === 'bom'}
+              required
+            >
+              <option value="">Select AWS Region</option>
+              {regions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.name} ({item.value})
+                </option>
+              ))}
+            </select>
+            {network.vpcSource === 'bom' && (
+              <small>Region is inherited from the selected BOM VPC.</small>
+            )}
+          </Field>
+
           <Field label="EC2 Resource Name">
 
             <input
@@ -1997,24 +2814,6 @@ function UserDashboard() {
               }
 
               placeholder="web-server"
-
-            />
-
-          </Field>
-
-          <Field label="Instance Name">
-
-            <input
-
-              value={config.instanceName}
-
-              onChange={(e) =>
-
-                updateEc2({ instanceName: e.target.value })
-
-              }
-
-              placeholder="web-server-01"
 
             />
 
@@ -2108,7 +2907,7 @@ function UserDashboard() {
 
             >
 
-              <option value="">Select Instance Type</option>
+              <option value="">{matchingInstances.length ? 'Select Instance Type' : 'No instances match the selected CPU/RAM preferences'}</option>
 
               {matchingInstances.map((item) => (
 
@@ -2412,19 +3211,15 @@ function UserDashboard() {
 
                   value={network.vpcResourceKey}
 
-                  onChange={(e) =>
-
+                  onChange={(e) => {
+                    const selected = vpcOptions.find((item) => item.resourceKey === e.target.value)
                     updateEc2Network({
-
                       vpcResourceKey: e.target.value,
-
                       subnetResourceKey: '',
-
                       associatePublicIpAddress: false
-
                     })
-
-                  }
+                    if (selected?.region) updateActive({ region: selected.region })
+                  }}
 
                 >
 
@@ -2440,9 +3235,11 @@ function UserDashboard() {
 
                     >
 
-                      {vpc.resourceName ||
+                      {vpc.vpcConfiguration?.name ||
 
-                        vpc.vpcConfiguration.name ||
+                        vpc.vpcConfiguration?.existingVpcId ||
+
+                        vpc.resourceName ||
 
                         vpc.resourceKey}
 
@@ -2598,41 +3395,365 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="Security Group IDs">
+          <Field label="Security Group Configuration">
 
-            <input
+            <select
 
-              value={network.securityGroupIds.join(', ')}
+              value={network.securityGroupMode || 'existing'}
 
               onChange={(e) =>
 
                 updateEc2Network({
 
-                  securityGroupIds: e.target.value
+                  securityGroupMode: e.target.value,
 
-                    .split(',')
+                  securityGroupIds: e.target.value === 'existing'
 
-                    .map((item) => item.trim())
+                    ? network.securityGroupIds || []
 
-                    .filter(Boolean)
+                    : [],
+
+                  securityGroup: network.securityGroup || {
+
+                    name: '',
+
+                    description: '',
+
+                    ingressRules: [],
+
+                    egressRules: []
+
+                  }
 
                 })
 
               }
 
-              placeholder="sg-0123456789abcdef0"
+            >
 
-            />
+              <option value="existing">Use Existing Security Group</option>
+
+              <option value="new">Create New Security Group</option>
+
+            </select>
 
             <small>
 
-              Separate multiple existing security group IDs
-
-              with commas.
+              Choose an existing AWS security group or define a new one for this EC2 resource.
 
             </small>
 
           </Field>
+
+          {(network.securityGroupMode || 'existing') === 'existing' ? (
+
+            <Field label="Existing Security Group IDs">
+
+              <input
+
+                value={(network.securityGroupIds || []).join(', ')}
+
+                onChange={(e) =>
+
+                  updateEc2Network({
+
+                    securityGroupIds: e.target.value
+
+                      .split(',')
+
+                      .map((item) => item.trim())
+
+                      .filter(Boolean)
+
+                  })
+
+                }
+
+                placeholder="sg-0123456789abcdef0"
+
+              />
+
+              <small>
+
+                Enter one or more existing security group IDs, separated by commas.
+
+              </small>
+
+            </Field>
+
+          ) : (
+
+            <div className="user-panel" style={{ gridColumn: '1 / -1', padding: 18 }}>
+
+              <div className="user-form-section-title">New Security Group Details</div>
+
+              <div className="user-form-grid">
+
+                <Field label="Security Group Name *">
+
+                  <input
+
+                    value={network.securityGroup?.name || ''}
+
+                    maxLength="255"
+
+                    onChange={(e) => updateEc2Network({
+
+                      securityGroup: {
+
+                        ...(network.securityGroup || {}),
+
+                        name: e.target.value
+
+                      }
+
+                    })}
+
+                    placeholder="web-application-sg"
+
+                  />
+
+                </Field>
+
+                <Field label="Description *">
+
+                  <input
+
+                    value={network.securityGroup?.description || ''}
+
+                    onChange={(e) => updateEc2Network({
+
+                      securityGroup: {
+
+                        ...(network.securityGroup || {}),
+
+                        description: e.target.value
+
+                      }
+
+                    })}
+
+                    placeholder="Security group for the web application"
+
+                  />
+
+                </Field>
+
+              </div>
+
+              {[
+
+                ['ingressRules', 'Inbound Rules', 'Source'],
+
+                ['egressRules', 'Outbound Rules', 'Destination']
+
+              ].map(([field, title, endpointLabel]) => (
+
+                <div key={field} style={{ marginTop: 18 }}>
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+
+                    <h3>{title}</h3>
+
+                    <button
+
+                      type="button"
+
+                      className="user-secondary-btn"
+
+                      onClick={() => updateEc2Network({
+
+                        securityGroup: {
+
+                          ...(network.securityGroup || {}),
+
+                          [field]: [
+
+                            ...(network.securityGroup?.[field] || []),
+
+                            {
+
+                              protocol: 'tcp',
+
+                              fromPort: '443',
+
+                              toPort: '443',
+
+                              cidr: '',
+
+                              description: ''
+
+                            }
+
+                          ]
+
+                        }
+
+                      })}
+
+                    >
+
+                      + Add Rule
+
+                    </button>
+
+                  </div>
+
+                  {(network.securityGroup?.[field] || []).length === 0 ? (
+
+                    <p style={{ color: '#64748b', fontSize: 13 }}>
+
+                      No {title.toLowerCase()} configured. Add rules to define permitted traffic.
+
+                    </p>
+
+                  ) : null}
+
+                  {(network.securityGroup?.[field] || []).map((rule, ruleIndex) => (
+
+                    <div key={`${field}-${ruleIndex}`} className="user-panel" style={{ padding: 14, marginBottom: 12 }}>
+
+                      <div className="user-form-grid">
+
+                        <Field label="Protocol">
+
+                          <select
+
+                            value={rule.protocol}
+
+                            onChange={(e) => {
+
+                              const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                              nextRules[ruleIndex] = {
+
+                                ...rule,
+
+                                protocol: e.target.value,
+
+                                fromPort: e.target.value === 'tcp' || e.target.value === 'udp' ? '443' : '',
+
+                                toPort: e.target.value === 'tcp' || e.target.value === 'udp' ? '443' : ''
+
+                              }
+
+                              updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                            }}
+
+                          >
+
+                            <option value="tcp">TCP</option>
+
+                            <option value="udp">UDP</option>
+
+                            <option value="icmp">ICMP</option>
+
+                            <option value="-1">All traffic</option>
+
+                          </select>
+
+                        </Field>
+
+                        {(rule.protocol === 'tcp' || rule.protocol === 'udp') && (
+
+                          <>
+
+                            <Field label="From Port">
+
+                              <input type="number" min="1" max="65535" value={rule.fromPort} onChange={(e) => {
+
+                                const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                                nextRules[ruleIndex] = { ...rule, fromPort: e.target.value }
+
+                                updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                              }} />
+
+                            </Field>
+
+                            <Field label="To Port">
+
+                              <input type="number" min="1" max="65535" value={rule.toPort} onChange={(e) => {
+
+                                const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                                nextRules[ruleIndex] = { ...rule, toPort: e.target.value }
+
+                                updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                              }} />
+
+                            </Field>
+
+                          </>
+
+                        )}
+
+                        <Field label={`${endpointLabel} IPv4 CIDR *`}>
+
+                          <input value={rule.cidr} onChange={(e) => {
+
+                            const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                            nextRules[ruleIndex] = { ...rule, cidr: e.target.value }
+
+                            updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                          }} placeholder="10.0.0.0/16" />
+
+                        </Field>
+
+                        <Field label="Rule Description">
+
+                          <input value={rule.description || ''} onChange={(e) => {
+
+                            const nextRules = [...(network.securityGroup?.[field] || [])]
+
+                            nextRules[ruleIndex] = { ...rule, description: e.target.value }
+
+                            updateEc2Network({ securityGroup: { ...network.securityGroup, [field]: nextRules } })
+
+                          }} placeholder="Allow application traffic" />
+
+                        </Field>
+
+                      </div>
+
+                      <button type="button" className="user-secondary-btn" style={{ marginTop: 10 }} onClick={() => updateEc2Network({
+
+                        securityGroup: {
+
+                          ...network.securityGroup,
+
+                          [field]: (network.securityGroup?.[field] || []).filter((_, index) => index !== ruleIndex)
+
+                        }
+
+                      })}>
+
+                        Remove Rule
+
+                      </button>
+
+                    </div>
+
+                  ))}
+
+                </div>
+
+              ))}
+
+              <small style={{ display: 'block', marginTop: 12, color: '#64748b' }}>
+
+                Use restricted CIDR ranges. Avoid 0.0.0.0/0 for administrative ports such as SSH (22) and RDP (3389).
+
+              </small>
+
+            </div>
+
+          )}
 
         </div>
 
@@ -2700,6 +3821,23 @@ function UserDashboard() {
 
           )}
 
+        </div>
+
+        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="user-primary-btn"
+            onClick={() => {
+              setAddedResourceKeys((previous) =>
+                previous.includes(active.resourceKey)
+                  ? previous
+                  : [...previous, active.resourceKey]
+              )
+              setActiveIndex(-1)
+            }}
+          >
+            Save & Collapse Resource
+          </button>
         </div>
 
       </>
@@ -2846,17 +3984,7 @@ function UserDashboard() {
 
           </div>
 
-          <button
 
-            className="user-primary-btn"
-
-            onClick={createNew}
-
-          >
-
-            + New BOM Request
-
-          </button>
 
         </div>
 
@@ -3148,43 +4276,7 @@ function UserDashboard() {
 
                 </Field>
 
-                <Field label="AWS Region *">
 
-                  <select
-
-                    value={region}
-
-                    onChange={(e) => setRegion(e.target.value)}
-
-                    disabled={masterDataLoading}
-
-                  >
-
-                    {!regions.length && (
-
-                      <option value="">No regions loaded</option>
-
-                    )}
-
-                    {regions.map((item) => (
-
-                      <option
-
-                        key={item.value}
-
-                        value={item.value}
-
-                      >
-
-                        {item.name} ({item.value})
-
-                      </option>
-
-                    ))}
-
-                  </select>
-
-                </Field>
 
               </div>
 
@@ -3194,132 +4286,129 @@ function UserDashboard() {
 
               </div>
 
-              <div
+              <div className="resource-configuration-list" style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
+                {resources.map((item, index) => {
+                  const isExpanded = activeIndex === index
+                  const isAdded = addedResourceKeys.includes(item.resourceKey)
+                  const vpcConfig = item.vpcConfiguration || {}
+                  const ec2Config = item.ec2Configuration || {}
+                  const resourceTitle = item.service === 'VPC'
+                    ? 'Amazon VPC'
+                    : item.service === 'EC2'
+                      ? 'Amazon EC2'
+                      : 'New resource'
+                  const resourceName = item.service === 'VPC'
+                    ? (vpcConfig.mode === 'existing'
+                      ? (vpcConfig.existingVpcId || 'Existing VPC')
+                      : (vpcConfig.name || 'Unnamed VPC'))
+                    : item.service === 'EC2'
+                      ? (item.resourceName || 'EC2 resource')
+                      : 'Choose a cloud service'
+                  const resourceDetails = item.service === 'VPC'
+                    ? [
+                        vpcConfig.mode === 'existing'
+                          ? 'Existing VPC'
+                          : (vpcConfig.ipv4Cidr || 'CIDR not configured'),
+                        `${vpcConfig.mode === 'existing'
+                          ? (vpcConfig.existingSubnets || []).length
+                          : (vpcConfig.subnets || []).length} subnet(s)`
+                      ]
+                    : item.service === 'EC2'
+                      ? [
+                          item.instanceType || 'Instance type not selected',
+                          `${item.quantity || 1} instance(s) · ${item.storage || 20} GiB`
+                        ]
+                      : ['Configuration not started']
 
-                style={{
-
-                  display: 'flex',
-
-                  flexWrap: 'wrap',
-
-                  gap: 10,
-
-                  marginBottom: 20
-
-                }}
-
-              >
-
-                {resources.map((item, index) => (
-
-                  <button
-
-                    key={item.resourceKey}
-
-                    type="button"
-
-                    className={
-
-                      activeIndex === index
-
-                        ? 'user-primary-btn'
-
-                        : 'user-secondary-btn'
-
-                    }
-
-                    onClick={() => setActiveIndex(index)}
-
-                  >
-
-                    Resource {index + 1}
-
-                    {item.service ? ` (${item.service})` : ''}
-
-                  </button>
-
-                ))}
-
-              </div>
-
-              <div
-
-                style={{
-
-                  padding: 20,
-
-                  border: '1px solid #e2e8f0',
-
-                  borderRadius: 12,
-
-                  background: '#f8fafc',
-
-                  marginBottom: 20
-
-                }}
-
-              >
-
-                <h3>Resource {activeIndex + 1}</h3>
-
-                <div className="user-form-grid">
-
-                  <Field label="Cloud Service *">
-
-                    <select
-
-                      value={active.service}
-
-                      onChange={(e) =>
-
-                        selectService(e.target.value)
-
-                      }
-
+                  return (
+                    <div
+                      key={item.resourceKey}
+                      className={`resource-configuration-card${isExpanded ? ' is-expanded' : ''}`}
+                      style={{
+                        border: isExpanded ? '1px solid #2563eb' : '1px solid #dbe3ef',
+                        borderRadius: 12,
+                        background: '#fff',
+                        overflow: 'hidden',
+                        boxShadow: isExpanded ? '0 4px 14px rgba(37, 99, 235, 0.08)' : '0 1px 3px rgba(15, 23, 42, 0.04)'
+                      }}
                     >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '16px 18px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                          <div style={{
+                            width: 38,
+                            height: 38,
+                            flex: '0 0 38px',
+                            display: 'grid',
+                            placeItems: 'center',
+                            borderRadius: 10,
+                            background: item.service === 'VPC' ? '#eff6ff' : item.service === 'EC2' ? '#f0fdf4' : '#f1f5f9',
+                            color: item.service === 'VPC' ? '#1d4ed8' : item.service === 'EC2' ? '#15803d' : '#64748b',
+                            fontWeight: 700
+                          }}>
+                            {item.service === 'VPC' ? 'V' : item.service === 'EC2' ? 'E' : index + 1}
+                          </div>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                              <strong style={{ color: '#0f172a', fontSize: 14 }}>Resource {index + 1}</strong>
+                              <span style={{ color: '#64748b', fontSize: 12 }}>{resourceTitle}</span>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                borderRadius: 999,
+                                padding: '3px 8px',
+                                fontSize: 11,
+                                fontWeight: 600,
+                                color: isAdded ? '#166534' : '#92400e',
+                                background: isAdded ? '#f0fdf4' : '#fffbeb'
+                              }}>
+                                {isAdded ? 'Added' : 'Draft'}
+                              </span>
+                            </div>
+                            <div style={{ color: '#334155', fontSize: 13, marginTop: 4, overflowWrap: 'anywhere' }}>{resourceName}</div>
+                            {!isExpanded && (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 14px', color: '#64748b', fontSize: 12, marginTop: 4 }}>
+                                {resourceDetails.map((detail, detailIndex) => <span key={detailIndex}>{detail}</span>)}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="user-secondary-btn"
+                          style={{ flex: '0 0 auto', whiteSpace: 'nowrap' }}
+                          onClick={() => setActiveIndex(isExpanded ? -1 : index)}
+                        >
+                          {isExpanded ? 'Collapse' : isAdded ? 'Edit' : 'Configure'}
+                        </button>
+                      </div>
 
-                      <option value="">
-
-                        Select Cloud Service
-
-                      </option>
-
-                      <option value="VPC" disabled={cloudProvider !== 'aws'}>
-
-                        Amazon VPC
-
-                      </option>
-
-                      <option value="EC2" disabled={cloudProvider !== 'aws'}>
-
-                        Amazon EC2
-
-                      </option>
-
-                      <option disabled>Amazon EBS (Coming Soon)</option>
-
-                      <option disabled>Amazon S3 (Coming Soon)</option>
-
-                      <option disabled>Amazon RDS (Coming Soon)</option>
-
-                    </select>
-
-                  </Field>
-
-                </div>
-
-                {isVpc && renderVpcForm()}
-
-                {isEc2 && renderEc2Form()}
-
-                {!active.service && (
-
-                  <p>Select a service to configure this resource.</p>
-
-                )}
-
+                      {isExpanded && (
+                        <div style={{ borderTop: '1px solid #e2e8f0', padding: 20, background: '#f8fafc' }}>
+                          <h3 style={{ marginTop: 0, marginBottom: 16, color: '#0f172a' }}>Configure Resource {index + 1}</h3>
+                          <div className="user-form-grid">
+                            <Field label="Cloud Service *">
+                              <select
+                                value={item.service}
+                                onChange={(e) => selectService(e.target.value)}
+                              >
+                                <option value="">Select Cloud Service</option>
+                                <option value="VPC" disabled={cloudProvider !== 'aws'}>Amazon VPC</option>
+                                <option value="EC2" disabled={cloudProvider !== 'aws'}>Amazon EC2</option>
+                                <option disabled>Amazon EBS (Coming Soon)</option>
+                                <option disabled>Amazon S3 (Coming Soon)</option>
+                                <option disabled>Amazon RDS (Coming Soon)</option>
+                              </select>
+                            </Field>
+                          </div>
+                          {isVpc && renderVpcForm()}
+                          {isEc2 && renderEc2Form()}
+                          {!item.service && <p style={{ color: '#64748b', marginBottom: 0 }}>Select a service to configure this resource.</p>}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
-
               <div
 
                 style={{
@@ -3391,26 +4480,6 @@ function UserDashboard() {
                   </button>
 
                 )}
-
-              </div>
-
-              <div className="user-panel" style={{ padding: 18 }}>
-
-                <h3>Resources Added ({resources.length})</h3>
-
-                {resources.map((item, index) => (
-
-                  <p key={item.resourceKey}>
-
-                    {index + 1}. {item.service || 'Not selected'}
-
-                    {' — '}
-
-                    {item.resourceName || 'Unnamed resource'}
-
-                  </p>
-
-                ))}
 
               </div>
 
@@ -3532,6 +4601,11 @@ function UserDashboard() {
 
               )}
 
+              {message && (
+                <div className="user-message" role="alert" style={{ margin: '16px 0' }}>
+                  {message}
+                </div>
+              )}
               <div className="user-form-actions">
 
                 <button
@@ -3546,9 +4620,7 @@ function UserDashboard() {
 
                     masterDataLoading ||
 
-                    cloudProvider !== 'aws' ||
-
-                    !region
+                    cloudProvider !== 'aws'
 
                   }
 
@@ -3709,23 +4781,23 @@ function UserDashboard() {
                       <td>{bom.engineerRemarks || '—'}</td>
 
                       <td>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <BomCsvDownload
+                            bomId={bom._id}
+                            ticketId={bom.ticketId}
+                            className="user-secondary-btn"
+                          />
 
-                        {bom.status === 'Changes Requested' ? (
-
-                          <button
-
-                            className="user-edit-btn"
-
-                            onClick={() => editBom(bom)}
-
-                          >
-
-                            Edit / Resubmit
-
-                          </button>
-
-                        ) : '—'}
-
+                          {bom.status === 'Changes Requested' ? (
+                            <button
+                              type="button"
+                              className="user-edit-btn"
+                              onClick={() => editBom(bom)}
+                            >
+                              Edit / Resubmit
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
 
                       <td>
