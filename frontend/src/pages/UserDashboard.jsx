@@ -2442,7 +2442,7 @@ function UserDashboard() {
 
                       }
 
-                      placeholder="public-subnet-a"
+                      placeholder={subnet.subnetType === 'private' ? 'private-subnet-a' : 'public-subnet-a'}
 
                     />
 
@@ -2569,7 +2569,7 @@ function UserDashboard() {
                     </select>
 
                     <small>
-                      Select the total IPv4 address capacity. CIDR sizing uses the full block size; AWS still reserves 5 addresses when the subnet is created.
+                      Select the total IPv4 address capacity.
                     </small>
 
                   </Field>
@@ -2606,41 +2606,7 @@ function UserDashboard() {
 
                   </Field>
 
-                  {subnet.subnetType === 'public' && (
 
-                    <Field label="Auto-assign Public IPv4">
-
-                      <select
-
-                        value={String(
-
-                          subnet.mapPublicIpOnLaunch
-
-                        )}
-
-                        onChange={(e) =>
-
-                          updateSubnet(index, {
-
-                            mapPublicIpOnLaunch:
-
-                              e.target.value === 'true'
-
-                          })
-
-                        }
-
-                      >
-
-                        <option value="false">Disabled</option>
-
-                        <option value="true">Enabled</option>
-
-                      </select>
-
-                    </Field>
-
-                  )}
 
                 </div>
 
