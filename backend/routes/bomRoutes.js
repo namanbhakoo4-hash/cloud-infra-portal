@@ -99,6 +99,10 @@ function normalizeResources(resources, fallbackRegion) {
     }
 
     if (service === 'EC2') {
+      if (typeof resource.resourceName !== 'string' || !resource.resourceName.trim()) {
+        throw new Error(`Enter an EC2 Resource Name for resource ${index + 1}.`)
+      }
+
       const config = resource.ec2Configuration
 
       if (!config || typeof config !== 'object') {
@@ -153,7 +157,15 @@ function normalizeResources(resources, fallbackRegion) {
       )
     }
 
-    if ((config.mode || 'new') === 'existing') {
+    if (!['new', 'existing'].includes(String(config.mode || '').trim())) {
+      throw new Error(`Select a VPC Option for resource ${index + 1}.`)
+    }
+
+    if (config.mode === 'new' && !String(config.name || '').trim()) {
+      throw new Error(`Enter a VPC Name for resource ${index + 1}.`)
+    }
+
+    if (config.mode === 'existing') {
       const existingVpcId = String(config.existingVpcId || '').trim()
       const awsVpcIdPattern = /^vpc-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
       const awsSubnetIdPattern = /^subnet-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
@@ -262,6 +274,32 @@ function normalizeResources(resources, fallbackRegion) {
       }
     }
 
+    const subnetCount = Number(config.subnetCount)
+    if (!Number.isInteger(subnetCount) || subnetCount < 1 || subnetCount > 4) {
+      throw new Error('Select the number of subnets (1 to 4).')
+    }
+
+    if (!['public-private', 'public', 'private'].includes(config.subnetConfiguration)) {
+      throw new Error('Select a subnet configuration.')
+    }
+
+    const submittedSubnetConfigurations = Array.isArray(config.subnets)
+      ? config.subnets
+      : []
+
+    if (submittedSubnetConfigurations.length !== subnetCount) {
+      throw new Error('Configure the selected number of subnets.')
+    }
+
+    for (const [subnetIndex, subnet] of submittedSubnetConfigurations.entries()) {
+      if (!String(subnet.name || '').trim()) {
+        throw new Error(`Subnet ${subnetIndex + 1}: enter a subnet name.`)
+      }
+      if (!['public', 'private'].includes(subnet.subnetType)) {
+        throw new Error(`Subnet ${subnetIndex + 1}: select a subnet type.`)
+      }
+    }
+
     const ipv4Cidr = String(config.ipv4Cidr || '').trim()
 
     const publicQuantity = Number(config.publicQuantity ?? 0)
@@ -311,9 +349,6 @@ function normalizeResources(resources, fallbackRegion) {
       )
     }
 
-    const submittedSubnetConfigurations = Array.isArray(config.subnets)
-      ? config.subnets
-      : []
     const submittedAvailabilityZones = submittedSubnetConfigurations
       .map((subnet) => String(subnet.availabilityZone || '').trim())
       .filter(Boolean)
@@ -358,6 +393,7 @@ function normalizeResources(resources, fallbackRegion) {
       vpcConfiguration: {
         ...config,
         mode: 'new',
+        subnetCount,
         ipv4Cidr,
         publicFirstCidr,
         privateFirstCidr,
@@ -381,6 +417,7 @@ function normalizeResources(resources, fallbackRegion) {
 function validateBomInput(body) {
   const {
     projectName,
+    cloudProvider,
     environment,
     region,
     resources,
@@ -390,6 +427,8 @@ function validateBomInput(body) {
   const fallbackRegion = String(region || '').trim()
 
   if (
+    typeof cloudProvider !== 'string' ||
+    cloudProvider !== 'aws' ||
     typeof projectName !== 'string' ||
     !projectName.trim() ||
     typeof environment !== 'string' ||
@@ -405,7 +444,7 @@ function validateBomInput(body) {
     !justification.trim()
   ) {
     throw new Error(
-      'Please provide a project name, valid environment, at least one resource, and business justification.'
+      'Please select AWS as the Cloud Provider and provide a project name, valid environment, at least one resource, and business justification.'
     )
   }
 

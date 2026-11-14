@@ -93,7 +93,7 @@ const newVpc = () => ({
 
   vpcConfiguration: {
 
-    mode: 'new',
+    mode: '',
 
 
     name: '',
@@ -113,7 +113,9 @@ const newVpc = () => ({
       { ...newSubnet('private'), availabilityZone: 'ap-south-1b' }
     ],
 
-    subnetConfiguration: 'public-private',
+    subnetCount: '',
+
+    subnetConfiguration: '',
 
     createInternetGateway: false,
 
@@ -377,9 +379,22 @@ function validateResources(resources, instanceTypes) {
       return `${label}: select a valid AWS Region.`
     }
 
-    if (resource.service !== 'VPC') continue
+    if (resource.service === 'EC2') {
+      if (!String(resource.resourceName || '').trim()) {
+        return `${label}: enter an EC2 Resource Name.`
+      }
+      continue
+    }
 
     const config = resource.vpcConfiguration
+
+    if (!['new', 'existing'].includes(config.mode)) {
+      return `${label}: select a VPC Option.`
+    }
+
+    if (config.mode === 'new' && !String(config.name || '').trim()) {
+      return `${label}: enter a VPC Name.`
+    }
 
     if (config.mode === 'existing') {
 
@@ -570,6 +585,28 @@ function validateResources(resources, instanceTypes) {
 
       continue
 
+    }
+
+    if (!['1', '2', '3', '4'].includes(String(config.subnetCount || ''))) {
+      return `${label}: select the number of subnets.`
+    }
+
+    if (!['public-private', 'public', 'private'].includes(config.subnetConfiguration)) {
+      return `${label}: select a subnet configuration.`
+    }
+
+    if (!Array.isArray(config.subnets) || config.subnets.length !== Number(config.subnetCount)) {
+      return `${label}: configure the selected number of subnets.`
+    }
+
+    for (const [subnetIndex, subnet] of config.subnets.entries()) {
+      const subnetLabel = `${label}, subnet ${subnetIndex + 1}`
+      if (!String(subnet.name || '').trim()) {
+        return `${subnetLabel}: enter a subnet name.`
+      }
+      if (!['public', 'private'].includes(subnet.subnetType)) {
+        return `${subnetLabel}: select a subnet type.`
+      }
     }
 
     const vpcCidr = parseCidr(config.ipv4Cidr)
@@ -1013,11 +1050,11 @@ function UserDashboard() {
 
   const [editingBomId, setEditingBomId] = useState(null)
 
-  const [cloudProvider, setCloudProvider] = useState('aws')
+  const [cloudProvider, setCloudProvider] = useState('')
 
   const [projectName, setProjectName] = useState('')
 
-  const [environment, setEnvironment] = useState('Development')
+  const [environment, setEnvironment] = useState('')
 
   const [justification, setJustification] = useState('')
 
@@ -1645,11 +1682,11 @@ function UserDashboard() {
   function resetForm() {
     setFormPage(1)
 
-    setCloudProvider('aws')
+    setCloudProvider('')
 
     setProjectName('')
 
-    setEnvironment('Development')
+    setEnvironment('')
 
     setJustification('')
 
@@ -1910,12 +1947,17 @@ function UserDashboard() {
     setMessage('')
 
     try {
+      if (!cloudProvider) {
+        throw new Error('Please select a Cloud Provider.')
+      }
+
       if (cloudProvider !== 'aws') {
         throw new Error('Only AWS BOM submission is enabled.')
       }
 
       const missingProjectInformation = []
       if (!projectName.trim()) missingProjectInformation.push('Project Name')
+      if (!environment) missingProjectInformation.push('Environment')
       if (!justification.trim()) missingProjectInformation.push('Justification')
 
       if (missingProjectInformation.length > 0) {
@@ -2021,7 +2063,7 @@ function UserDashboard() {
             </select>
           </Field>
 
-          <Field label="VPC Option">
+          <Field label="VPC Option *">
 
             <select
 
@@ -2034,6 +2076,8 @@ function UserDashboard() {
               }
 
             >
+
+              <option value="">Select VPC Option</option>
 
               <option value="new">Create New VPC</option>
 
@@ -2193,7 +2237,7 @@ function UserDashboard() {
 
             <>
 
-              <Field label="VPC Name">
+              <Field label="VPC Name *">
 
                 <input
 
@@ -2206,6 +2250,8 @@ function UserDashboard() {
                   }
 
                   placeholder="my-vpc"
+
+                  required
 
                 />
 
@@ -2268,27 +2314,19 @@ function UserDashboard() {
 
             <div className="user-form-grid">
 
-              <Field label="Number of subnets">
+              <Field label="Number of subnets *">
 
                 <select
 
-                  value={String(config.subnets.length || 2)}
+                  required
+
+                  value={config.subnetCount || ''}
 
                   onChange={(e) => {
 
                     const count = Number(e.target.value)
 
-                    const currentMode = config.subnetConfiguration || (config.subnets.some((subnet) => subnet.subnetType === 'public') &&
-
-                      config.subnets.some((subnet) => subnet.subnetType === 'private')
-
-                      ? 'public-private'
-
-                      : config.subnets.every((subnet) => subnet.subnetType === 'public')
-
-                        ? 'public'
-
-                        : 'private')
+                    const currentMode = config.subnetConfiguration || ''
 
                     const nextSubnets = Array.from({ length: count }, (_, index) => {
 
@@ -2302,7 +2340,11 @@ function UserDashboard() {
 
                           ? 'private'
 
-                          : index % 2 === 0 ? 'public' : 'private'
+                          : currentMode === 'public-private'
+
+                            ? index % 2 === 0 ? 'public' : 'private'
+
+                            : existing?.subnetType || ''
 
                       return existing
 
@@ -2320,6 +2362,8 @@ function UserDashboard() {
 
                     updateVpc({
 
+                      subnetCount: String(count),
+
                       subnetConfiguration: currentMode,
 
                       subnets: nextSubnets,
@@ -2332,6 +2376,8 @@ function UserDashboard() {
 
                 >
 
+                  <option value="">Select number of subnets</option>
+
                   {[1, 2, 3, 4].map((count) => (
 
                     <option key={count} value={count}>{count}</option>
@@ -2342,19 +2388,13 @@ function UserDashboard() {
 
               </Field>
 
-              <Field label="Subnet configuration">
+              <Field label="Subnet configuration *">
 
                 <select
 
-                  value={config.subnetConfiguration || (config.subnets.length && config.subnets.every((subnet) => subnet.subnetType === 'public')
+                  required
 
-                    ? 'public'
-
-                    : config.subnets.length && config.subnets.every((subnet) => subnet.subnetType === 'private')
-
-                      ? 'private'
-
-                      : 'public-private')}
+                  value={config.subnetConfiguration || ''}
 
                   onChange={(e) => {
 
@@ -2392,6 +2432,8 @@ function UserDashboard() {
 
                 >
 
+                  <option value="">Select subnet configuration</option>
+
                   <option value="public-private">Public and private subnets</option>
 
                   <option value="public">All public subnets</option>
@@ -2426,9 +2468,11 @@ function UserDashboard() {
 
                 <div className="user-form-grid">
 
-                  <Field label="Subnet Name">
+                  <Field label="Subnet Name *">
 
                     <input
+
+                      required
 
                       value={subnet.name}
 
@@ -2448,11 +2492,13 @@ function UserDashboard() {
 
                   </Field>
 
-                  <Field label="Subnet Type">
+                  <Field label="Subnet Type *">
 
                     <select
 
-                      value={subnet.subnetType}
+                      required
+
+                      value={subnet.subnetType || ''}
 
                       onChange={(e) => {
 
@@ -2491,6 +2537,8 @@ function UserDashboard() {
                       }}
 
                     >
+
+                      <option value="">Select subnet type</option>
 
                       <option value="public">Public</option>
 
@@ -2816,7 +2864,7 @@ function UserDashboard() {
             )}
           </Field>
 
-          <Field label="EC2 Resource Name">
+          <Field label="EC2 Resource Name *">
 
             <input
 
@@ -2829,6 +2877,8 @@ function UserDashboard() {
               }
 
               placeholder="web-server"
+
+              required
 
             />
 
@@ -4200,7 +4250,7 @@ function UserDashboard() {
 
               <div className="user-form-grid">
 
-                <Field label="Cloud Provider">
+                <Field label="Cloud Provider *">
 
                   <select
 
@@ -4223,6 +4273,8 @@ function UserDashboard() {
                     }}
 
                   >
+
+                    <option value="">Select Cloud Provider</option>
 
                     {Object.entries(PROVIDERS).map(
 
@@ -4260,7 +4312,7 @@ function UserDashboard() {
 
                 </Field>
 
-                <Field label="Environment">
+                <Field label="Environment *">
 
                   <select
 
@@ -4273,6 +4325,8 @@ function UserDashboard() {
                     }
 
                   >
+
+                    <option value="">Select Environment</option>
 
                     {[
 
