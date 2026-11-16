@@ -111,9 +111,56 @@ function normalizeResources(resources, fallbackRegion) {
         )
       }
 
-      const quantity = Number(config.quantity ?? 1)
+      const quantityValue = config.quantity ?? resource.quantity
+      const quantity = Number(quantityValue)
+      const instanceType = String(resource.instanceType || config.instanceType || '').trim()
+      const operatingSystem = String(resource.operatingSystem || config.operatingSystem || '').trim()
+      const operatingSystemType = String(
+        resource.operatingSystemType || config.operatingSystemType || ''
+      ).trim()
+      const storage = Number(resource.storage)
+      const storageType = String(resource.storageType || '').trim()
+      const operatingSystemTypes = {
+        Linux: [
+          'Ubuntu 22.04 LTS',
+          'Ubuntu 24.04 LTS',
+          'Kali Linux',
+          'Amazon Linux 2023',
+          'Amazon Linux 2'
+        ],
+        Windows: [
+          'Windows 10',
+          'Windows 11',
+          'Windows Server 2019',
+          'Windows Server 2022',
+          'Windows Server 2025'
+        ]
+      }
+
+      if (!instanceType) {
+        throw new Error(`Select an EC2 instance type for resource ${index + 1}.`)
+      }
+
+      if (!['Linux', 'Windows'].includes(operatingSystem)) {
+        throw new Error(`Select an Operating System for EC2 resource ${index + 1}.`)
+      }
+
+      if (!operatingSystemTypes[operatingSystem].includes(operatingSystemType)) {
+        throw new Error(`Select a valid OS Type for ${operatingSystem} on EC2 resource ${index + 1}.`)
+      }
+
+      if (!Number.isInteger(storage) || storage < 1) {
+        throw new Error(`Root EBS storage size for EC2 resource ${index + 1} must be a positive whole number.`)
+      }
+
+      if (!['gp3', 'gp2', 'standard'].includes(storageType)) {
+        throw new Error(`Select a valid Root EBS Type for EC2 resource ${index + 1}.`)
+      }
 
       if (
+        quantityValue === undefined ||
+        quantityValue === null ||
+        String(quantityValue).trim() === '' ||
         !Number.isInteger(quantity) ||
         quantity < 1 ||
         quantity > 100
@@ -124,6 +171,51 @@ function normalizeResources(resources, fallbackRegion) {
       }
 
       const network = config.network || {}
+
+      if (!['bom', 'existing'].includes(String(network.vpcSource || '').trim())) {
+        throw new Error(`Select a VPC Source for EC2 resource ${index + 1}.`)
+      }
+
+      if (!['existing', 'new'].includes(String(network.securityGroupMode || '').trim())) {
+        throw new Error(`Select a Security Group Configuration for EC2 resource ${index + 1}.`)
+      }
+
+      if (network.vpcSource === 'existing') {
+        const vpcId = String(network.vpcId || '').trim()
+        const subnetId = String(network.subnetId || '').trim()
+        const awsVpcIdPattern = /^vpc-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+        const awsSubnetIdPattern = /^subnet-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+
+        if (!awsVpcIdPattern.test(vpcId)) {
+          throw new Error(`Enter a valid existing VPC ID for EC2 resource ${index + 1}.`)
+        }
+
+        if (!awsSubnetIdPattern.test(subnetId)) {
+          throw new Error(`Enter a valid existing subnet ID for EC2 resource ${index + 1}.`)
+        }
+      }
+
+      if (network.securityGroupMode === 'existing') {
+        const securityGroupIds = Array.isArray(network.securityGroupIds)
+          ? network.securityGroupIds.map((id) => String(id || '').trim()).filter(Boolean)
+          : []
+        const awsSecurityGroupIdPattern = /^sg-[a-fA-F0-9]{8}([a-fA-F0-9]{9})?$/
+
+        if (securityGroupIds.length === 0 || securityGroupIds.some((id) => !awsSecurityGroupIdPattern.test(id))) {
+          throw new Error(`Enter at least one valid existing security group ID for EC2 resource ${index + 1}.`)
+        }
+      }
+
+      if (network.securityGroupMode === 'new') {
+        const securityGroup = network.securityGroup || {}
+        if (!/^[A-Za-z0-9._-]{1,255}$/.test(String(securityGroup.name || '').trim())) {
+          throw new Error(`Enter a valid new security group name for EC2 resource ${index + 1}.`)
+        }
+        if (!String(securityGroup.description || '').trim()) {
+          throw new Error(`Enter a description for the new security group on EC2 resource ${index + 1}.`)
+        }
+      }
+
       if (network.vpcSource === 'bom') {
         const linkedVpcRegion = vpcRegions.get(String(network.vpcResourceKey || ''))
         if (!linkedVpcRegion) {
@@ -141,8 +233,17 @@ function normalizeResources(resources, fallbackRegion) {
         resourceKey,
         service,
         region: resourceRegion,
+        instanceType,
+        operatingSystem,
+        operatingSystemType,
+        storage,
+        storageType,
+        quantity,
         ec2Configuration: {
           ...config,
+          instanceType,
+          operatingSystem,
+          operatingSystemType,
           quantity,
           amiId: String(config.amiId || '').trim()
         }

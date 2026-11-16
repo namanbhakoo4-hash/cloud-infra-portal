@@ -1,0 +1,35 @@
+
+services:
+  backend:
+    image: cloud-infra-backend:1.0
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: cloud-infra-backend
+    env_file:
+      - backend/.env
+    environment:
+      TERRAFORM_DATA_ROOT: /terraform-data
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./terraform/generated:/app/terraform/generated
+      - terraform-plugin-cache:/root/.terraform/terraform/plugin-cache
+      - terraform-data:/terraform-data
+    restart: unless-stopped
+
+  frontend:
+    image: cloud-infra-frontend:1.0
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: cloud-infra-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  terraform-plugin-cache:
+  terraform-data:

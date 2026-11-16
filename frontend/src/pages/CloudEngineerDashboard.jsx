@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import './CloudEngineerDashboard.css'
 
-const API_URL = 'http://localhost:5000'
+const API_URL = ''
 
 function CloudEngineerDashboard() {
   const navigate = useNavigate()

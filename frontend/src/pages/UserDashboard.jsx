@@ -10,7 +10,7 @@ import RouteTableBuilder from '../components/RouteTableBuilder'
 import BomCsvDownload from '../components/BomCsvDownload'
 import '../components/RouteTableBuilder.css'
 
-const API = 'http://localhost:5000'
+const API = ''
 
 const PROVIDERS = {
 
@@ -152,15 +152,15 @@ const newEc2 = () => ({
 
   instanceType: '',
 
-  operatingSystem: 'Linux',
+  operatingSystem: '',
 
-  operatingSystemType: 'Ubuntu 22.04 LTS',
+  operatingSystemType: '',
 
   storage: 20,
 
-  storageType: 'gp3',
+  storageType: '',
 
-  quantity: 1,
+  quantity: '',
 
   ec2Configuration: {
 
@@ -170,15 +170,15 @@ const newEc2 = () => ({
 
     keyPairName: '',
 
-    operatingSystem: 'Linux',
+    operatingSystem: '',
 
-    operatingSystemType: 'Ubuntu 22.04 LTS',
+    operatingSystemType: '',
 
-    quantity: 1,
+    quantity: '',
 
     network: {
 
-      vpcSource: 'existing',
+      vpcSource: '',
 
       vpcResourceKey: '',
 
@@ -190,7 +190,7 @@ const newEc2 = () => ({
 
       associatePublicIpAddress: false,
 
-      securityGroupMode: 'existing',
+      securityGroupMode: '',
 
       securityGroupIds: [],
 
@@ -831,6 +831,39 @@ const previousCidrs = []
 
     }
 
+    const operatingSystem = String(resource.operatingSystem || '').trim()
+    const operatingSystemType = String(
+      config.operatingSystemType || resource.operatingSystemType || ''
+    ).trim()
+    const operatingSystemTypes = {
+      Linux: [
+        'Ubuntu 22.04 LTS',
+        'Ubuntu 24.04 LTS',
+        'Kali Linux',
+        'Amazon Linux 2023',
+        'Amazon Linux 2'
+      ],
+      Windows: [
+        'Windows 10',
+        'Windows 11',
+        'Windows Server 2019',
+        'Windows Server 2022',
+        'Windows Server 2025'
+      ]
+    }
+
+    if (!['Linux', 'Windows'].includes(operatingSystem)) {
+      return `${label}: select an Operating System.`
+    }
+
+    if (!operatingSystemTypes[operatingSystem].includes(operatingSystemType)) {
+      return `${label}: select a valid OS Type for ${operatingSystem}.`
+    }
+
+    if (!['gp3', 'gp2', 'standard'].includes(String(resource.storageType || '').trim())) {
+      return `${label}: select a valid Root EBS Type.`
+    }
+
     if (
 
       !Number.isInteger(Number(resource.quantity)) ||
@@ -855,6 +888,14 @@ const previousCidrs = []
 
       return `${label}: enter a valid root EBS storage size.`
 
+    }
+
+    if (!['bom', 'existing'].includes(String(network.vpcSource || '').trim())) {
+      return `${label}: select a VPC Source.`
+    }
+
+    if (!['existing', 'new'].includes(String(network.securityGroupMode || '').trim())) {
+      return `${label}: select a Security Group Configuration.`
     }
 
     if (network.vpcSource === 'bom') {
@@ -975,17 +1016,17 @@ const previousCidrs = []
 
       }
 
-    } else if (
+    } else if (network.securityGroupMode === 'existing') {
 
-      (network.securityGroupIds || []).some(
+      const securityGroupIds = (network.securityGroupIds || []).filter(Boolean)
 
-        (id) => !awsId(id, 'sg')
+      if (securityGroupIds.length === 0) {
+        return `${label}: enter at least one existing security group ID.`
+      }
 
-      )
-
-    ) {
-
-      return `${label}: enter valid security group IDs.`
+      if (securityGroupIds.some((id) => !awsId(id, 'sg'))) {
+        return `${label}: enter valid security group IDs.`
+      }
 
     }
 
@@ -1786,7 +1827,7 @@ function UserDashboard() {
 
               ...resource.ec2Configuration,
 
-              operatingSystemType: resource.ec2Configuration?.operatingSystemType || resource.operatingSystemType || (resource.operatingSystem === 'Windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS'),
+              operatingSystemType: resource.ec2Configuration?.operatingSystemType || resource.operatingSystemType || '',
 
               network: {
 
@@ -1902,7 +1943,7 @@ function UserDashboard() {
 
           operatingSystem: item.operatingSystem,
 
-          operatingSystemType: item.ec2Configuration.operatingSystemType || item.operatingSystemType || (item.operatingSystem === 'Windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS'),
+          operatingSystemType: item.ec2Configuration.operatingSystemType || item.operatingSystemType || '',
 
           storage: Number(item.storage),
 
@@ -1924,7 +1965,7 @@ function UserDashboard() {
 
             operatingSystem: item.operatingSystem,
 
-            operatingSystemType: item.ec2Configuration.operatingSystemType || item.operatingSystemType || (item.operatingSystem === 'Windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS'),
+            operatingSystemType: item.ec2Configuration.operatingSystemType || item.operatingSystemType || '',
 
             quantity: Number(item.quantity)
 
@@ -2988,25 +3029,21 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="Operating System">
+          <Field label="Operating System *">
 
             <select
 
-              value={active.operatingSystem}
+              value={active.operatingSystem || ''}
 
               onChange={(e) => {
 
                 const operatingSystem = e.target.value
 
-                const operatingSystemType = operatingSystem === 'Windows'
-                  ? 'Windows Server 2022'
-                  : 'Ubuntu 22.04 LTS'
-
                 updateActive({
 
                   operatingSystem,
 
-                  operatingSystemType,
+                  operatingSystemType: '',
 
                   ec2Configuration: {
 
@@ -3014,7 +3051,7 @@ function UserDashboard() {
 
                     operatingSystem,
 
-                    operatingSystemType
+                    operatingSystemType: ''
 
                   }
 
@@ -3022,7 +3059,11 @@ function UserDashboard() {
 
               }}
 
+              required
+
             >
+
+              <option value="">Select Operating System</option>
 
               <option value="Linux">Linux</option>
 
@@ -3032,11 +3073,13 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="Type">
+          <Field label="OS Type *">
 
             <select
 
-              value={config.operatingSystemType || active.operatingSystemType || (active.operatingSystem === 'Windows' ? 'Windows Server 2022' : 'Ubuntu 22.04 LTS')}
+              value={config.operatingSystemType || active.operatingSystemType || ''}
+
+              required
 
               onChange={(e) => {
 
@@ -3059,6 +3102,8 @@ function UserDashboard() {
               }}
 
             >
+
+              <option value="">Select OS Type</option>
 
               {active.operatingSystem === 'Windows' ? (
 
@@ -3122,13 +3167,15 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="Root EBS Size (GiB)">
+          <Field label="Root EBS Size (GiB) *">
 
             <input
 
               type="number"
 
               min="1"
+
+              required
 
               value={active.storage}
 
@@ -3146,11 +3193,13 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="Root EBS Type">
+          <Field label="Root EBS Type *">
 
             <select
 
-              value={active.storageType}
+              value={active.storageType || ''}
+
+              required
 
               onChange={(e) =>
 
@@ -3163,6 +3212,8 @@ function UserDashboard() {
               }
 
             >
+
+              <option value="">Select Root EBS Type</option>
 
               {EBS_TYPES.map(([value, name]) => (
 
@@ -3178,7 +3229,7 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="Quantity">
+          <Field label="Quantity *">
 
             <input
 
@@ -3188,7 +3239,9 @@ function UserDashboard() {
 
               max="100"
 
-              value={active.quantity}
+              required
+
+              value={active.quantity ?? ''}
 
               onChange={(e) =>
 
@@ -3222,11 +3275,13 @@ function UserDashboard() {
 
         <div className="user-form-grid">
 
-          <Field label="VPC Source">
+          <Field label="VPC Source *">
 
             <select
 
-              value={network.vpcSource}
+              value={network.vpcSource || ''}
+
+              required
 
               onChange={(e) =>
 
@@ -3249,6 +3304,8 @@ function UserDashboard() {
               }
 
             >
+
+              <option value="">Select VPC Source</option>
 
               <option value="existing">
 
@@ -3460,11 +3517,13 @@ function UserDashboard() {
 
           </Field>
 
-          <Field label="Security Group Configuration">
+          <Field label="Security Group Configuration *">
 
             <select
 
-              value={network.securityGroupMode || 'existing'}
+              value={network.securityGroupMode || ''}
+
+              required
 
               onChange={(e) =>
 
@@ -3496,6 +3555,8 @@ function UserDashboard() {
 
             >
 
+              <option value="">Select Security Group Configuration</option>
+
               <option value="existing">Use Existing Security Group</option>
 
               <option value="new">Create New Security Group</option>
@@ -3510,7 +3571,7 @@ function UserDashboard() {
 
           </Field>
 
-          {(network.securityGroupMode || 'existing') === 'existing' ? (
+          {network.securityGroupMode === 'existing' ? (
 
             <Field label="Existing Security Group IDs">
 

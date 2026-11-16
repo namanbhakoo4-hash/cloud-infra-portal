@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import './AdminDashboard.css'
 
-const API_URL = 'http://localhost:5000'
+const API_URL = ''
 
 function Dashboard() {
   const navigate = useNavigate()

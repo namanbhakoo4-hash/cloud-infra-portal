@@ -1,3 +1,4 @@
+
 function BomCsvDownload({ bomId, ticketId, className = '' }) {
   const downloadFile = async (format) => {
     try {
@@ -10,7 +11,7 @@ function BomCsvDownload({ bomId, ticketId, className = '' }) {
       const isExcel = format === 'xlsx'
       const extension = isExcel ? 'xlsx' : 'csv'
       const response = await fetch(
-        `http://localhost:5000/api/bom/${bomId}/export.${extension}`,
+        `/api/bom/${bomId}/export.${extension}`,
         {
           method: 'GET',
           headers: {
