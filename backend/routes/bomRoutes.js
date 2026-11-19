@@ -276,11 +276,22 @@ function normalizeResources(resources, fallbackRegion) {
         throw new Error(`Existing VPC ID for resource ${index + 1} is invalid.`)
       }
 
-      if (!Array.isArray(config.existingSubnets) || config.existingSubnets.length === 0) {
-        throw new Error(`Add at least one existing subnet to resource ${index + 1}.`)
+      const existingSubnetsInput = config.existingSubnets ?? []
+      const createdSubnets = config.createdSubnets ?? []
+
+      if (!Array.isArray(existingSubnetsInput)) {
+        throw new Error(`Existing subnets for resource ${index + 1} must be an array.`)
       }
 
-      const existingSubnets = config.existingSubnets.map((subnet, subnetIndex) => {
+      if (!Array.isArray(createdSubnets)) {
+        throw new Error(`New subnets for resource ${index + 1} must be an array.`)
+      }
+
+      if (existingSubnetsInput.length === 0 && createdSubnets.length === 0) {
+        throw new Error(`Add at least one existing subnet or configure at least one new subnet for resource ${index + 1}.`)
+      }
+
+      const existingSubnets = existingSubnetsInput.map((subnet, subnetIndex) => {
         const subnetId = String(subnet.subnetId || '').trim()
         const subnetKey = String(subnet.resourceKey || `${resourceKey}_existing_subnet_${subnetIndex + 1}`).trim()
         const subnetType = String(subnet.subnetType || 'private').toLowerCase()
@@ -297,7 +308,7 @@ function normalizeResources(resources, fallbackRegion) {
           throw new Error(`Existing subnet ${subnetIndex + 1} has an invalid subnet type.`)
         }
 
-        return { resourceKey: subnetKey, subnetId, subnetType }
+        return { resourceKey: subnetKey, subnetId, subnetType, ipv4Cidr: String(subnet.ipv4Cidr || '').trim() }
       })
 
       if (config.existingRouteTableId && !awsRouteTableIdPattern.test(String(config.existingRouteTableId).trim())) {
